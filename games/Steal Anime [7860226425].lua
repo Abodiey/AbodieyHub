@@ -24,10 +24,12 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
+local VirtualUser = game:GetService("VirtualUser")
 local LocalPlayer = Players.LocalPlayer
 
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 local Root = Character:WaitForChild("HumanoidRootPart")
+local Torso = Character:WaitForChild("Torso")
 local Humanoid = Character:WaitForChild("Humanoid")
 local PlayerScripts = LocalPlayer:WaitForChild("PlayerScripts")
 
@@ -119,6 +121,7 @@ end
 local function onCharacterReady(char)
     Character = char
     Root = char:WaitForChild("HumanoidRootPart")
+    Torso = char:WaitForChild("Torso")
     Humanoid = char:WaitForChild("Humanoid")
     Backpack = LocalPlayer:WaitForChild("Backpack")
     
@@ -193,10 +196,11 @@ local BasesFolder = workspace:WaitForChild("Bases")
 -- ==========================================
 local CombatToggled = false
 local AutoLockToggled = true
-local AutoCollectToggled = false
+local AutoCollectToggled = true
 local AntiStealToggled = true
 local StealGlitchToggled = false
 local StealGlitchMode = "Remote Touch" 
+local TouchOriginPart = "HumanoidRootPart"
 local RainbowGlitchToggled = false
 local RainbowGlitchMode = "Remote Touch" 
 local DisableStealingToggled = false 
@@ -205,7 +209,6 @@ local AntiAfkSystemToggled = false
 
 local AutoCraftToggled = false
 local ActiveCraftFolders = { ["Characters"] = true }
-local ScriptAutoSpinToggled = false
 
 local TargetCharacterList = {}
 local AutoTpWalkingCharToggled = false
@@ -216,9 +219,10 @@ local AutoStealOnTpEnabled = false
 -- Targeted Character Offset System Properties
 local TargetYOffsetValue = 0
 local TargetMinYFloorValue = -5
+local AntiStealBehindOffset = 5
 
-getgenv().AntiCheatBypassToggled = false
-getgenv().AntiRagdollToggled = false
+getgenv().AntiCheatBypassToggled = true
+getgenv().AntiRagdollToggled = true
 getgenv().TargetSpeed = originalWalkSpeedValue
 getgenv().TargetJumpValue = originalJumpPowerValue
 getgenv().BaseLockUnderOffset = 3
@@ -364,7 +368,7 @@ local function getPrioritizedTargets(searchFolderParent)
     
     table.sort(extractedList, function(a, b)
         if a.Weight ~= b.Weight then
-            return a.Weight < b.Weight
+            return a.Weight < wB
         end
         return a.CashVal < b.CashVal
     end)
@@ -372,33 +376,49 @@ local function getPrioritizedTargets(searchFolderParent)
     return extractedList
 end
 
+local function fireSecureTouchInterest(targetPart)
+    local sourcePart = (TouchOriginPart == "Torso" and Torso) or Root
+    if sourcePart and targetPart and targetPart:FindFirstChildOfClass("TouchInterest") then
+        firetouchinterest(sourcePart, targetPart, 0)
+        task.wait()
+        firetouchinterest(sourcePart, targetPart, 1)
+    end
+end
+
 local function executeAdvancedPrompts(targetRoot)
     if not targetRoot then return end
     
     if AutoBuyOnTpEnabled then
         local buyPrompt = targetRoot:FindFirstChild("BuyPrompt")
-        if buyPrompt and buyPrompt:IsA("ProximityPrompt") then fireproximityprompt(buyPrompt) end
+        if buyPrompt and buyPrompt:IsA("ProximityPrompt") then
+            local finalYCoordinate = targetRoot.Position.Y + TargetYOffsetValue
+            if finalYCoordinate < TargetMinYFloorValue then
+                finalYCoordinate = TargetMinYFloorValue
+            end
+            if Root then
+                Root.CFrame = CFrame.new(targetRoot.Position.X, finalYCoordinate, targetRoot.Position.Z)
+            end
+            fireproximityprompt(buyPrompt)
+        end
     end
     
     if AutoStealOnTpEnabled then
         local stealPrompt = targetRoot:FindFirstChild("StealPrompt")
         if stealPrompt and stealPrompt:IsA("ProximityPrompt") then 
+            if Root then
+                Root.CFrame = CFrame.new(targetRoot.Position.X, targetRoot.Position.Y, targetRoot.Position.Z)
+            end
+            
+            local camera = workspace.CurrentCamera
+            if camera then
+                camera.CFrame = CFrame.new(camera.CFrame.Position, targetRoot.Position)
+            end
+            
             stealPrompt:InputHoldBegin()
             task.wait(stealPrompt.HoldDuration)
             stealPrompt:InputHoldEnd()
         end
     end
-end
-
--- Processes the computed target vector against offset sliders and fallback boundaries
-local function calculateTargetCFrameWithOffset(baseTargetVector)
-    local finalYCoordinate = baseTargetVector.Y + TargetYOffsetValue
-    
-    if finalYCoordinate < TargetMinYFloorValue then
-        finalYCoordinate = TargetMinYFloorValue
-    end
-    
-    return CFrame.new(baseTargetVector.X, finalYCoordinate, baseTargetVector.Z)
 end
 
 local function setupStealPartCollisionHook(stealPart)
@@ -469,14 +489,16 @@ end)
 -- Auto Teleport to Walking Character Loop
 task.spawn(function()
     while getgenv().BaseScriptTrackerKey == startTime do
-        if AutoTpWalkingCharToggled and Root and workspace:FindFirstChild("Characters") then
-            local targets = getPrioritizedTargets(workspace.Characters)
+        if AutoTpWalkingCharToggled and Root and ReplicatedStorage:FindFirstChild("Characters") then
+            local targets = getPrioritizedTargets(ReplicatedStorage.Characters)
             for _, targetData in ipairs(targets) do
                 if not AutoTpWalkingCharToggled or getgenv().BaseScriptTrackerKey ~= startTime then break end
                 local targetModel = targetData.Instance
                 local targetRoot = targetModel:FindFirstChild("HumanoidRootPart")
                 if targetRoot and Root then
-                    Root.CFrame = calculateTargetCFrameWithOffset(targetRoot.Position)
+                    if not AutoBuyOnTpEnabled then
+                        Root.CFrame = CFrame.new(targetRoot.Position)
+                    end
                     executeAdvancedPrompts(targetRoot)
                 end
             end
@@ -495,9 +517,15 @@ task.spawn(function()
                     local targets = getPrioritizedTargets(container)
                     for _, targetData in ipairs(targets) do
                         local targetModel = targetData.Instance
+                        local targetModelParentBase = targetModel:FindFirstAncestorOfClass("Folder")
+                        if targetModelParentBase and targetModelParentBase.Parent == base then
+                            continue
+                        end
                         local targetRoot = targetModel:FindFirstChild("HumanoidRootPart")
                         if targetRoot and Root then
-                            Root.CFrame = calculateTargetCFrameWithOffset(targetRoot.Position)
+                            if not AutoBuyOnTpEnabled then
+                                Root.CFrame = CFrame.new(targetRoot.Position)
+                            end
                             executeAdvancedPrompts(targetRoot)
                         end
                     end
@@ -541,40 +569,19 @@ task.spawn(function()
     end
 end)
 
--- Script-driven Auto Spin Thread Execution
-task.spawn(function()
-    while getgenv().BaseScriptTrackerKey == startTime do
-        if ScriptAutoSpinToggled and SpinRequestEvent then SpinRequestEvent:FireServer() end
-        task.wait(0.5)
-    end
-end)
-
--- Optimized Auto Lock Base Loop
-task.spawn(function()
-    while getgenv().BaseScriptTrackerKey == startTime do
-        RunService.RenderStepped:Wait()
-        if AutoLockToggled and Root and base then
-            local lockButton = base:FindFirstChild("LockButton")
-            local lockTime = LocalPlayer:GetAttribute("CurrentLockTime") or 0
-            if lockButton and lockButton:FindFirstChild("TouchInterest") and lockTime <= 0 then
-                local originalCFrame = Root.CFrame
-                repeat
-                    if Root:IsA("BasePart") then
-                        Root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                        Root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                    end
-                    Root.CFrame = CFrame.new(lockButton.Position - Vector3.new(0, getgenv().BaseLockUnderOffset, 0))
-                    firetouchinterest(Root, lockButton, 0)
-                    RunService.RenderStepped:Wait()
-                    firetouchinterest(Root, lockButton, 1)
-                    RunService.RenderStepped:Wait()
-                    lockTime = LocalPlayer:GetAttribute("CurrentLockTime") or 0
-                until lockTime > 0 or not AutoLockToggled or getgenv().BaseScriptTrackerKey ~= startTime
-                
-                if Root and Root.Parent and getgenv().BaseScriptTrackerKey == startTime then
-                    Root.CFrame = originalCFrame
-                end
+-- Dedicated RenderStepped Framework for Frame-Perfect Lock Teleportation
+RunService.RenderStepped:Connect(function()
+    if getgenv().BaseScriptTrackerKey == startTime and AutoLockToggled and Root and base then
+        local lockButton = base:FindFirstChild("LockButton")
+        local lockTime = LocalPlayer:GetAttribute("CurrentLockTime") or 0
+        if lockButton and lockButton:FindFirstChild("TouchInterest") and lockTime <= 0 then
+            if Root:IsA("BasePart") then
+                Root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                Root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
             end
+            Root.CFrame = CFrame.new(lockButton.Position - Vector3.new(0, getgenv().BaseLockUnderOffset, 0))
+            firetouchinterest(Root, lockButton, 0)
+            firetouchinterest(Root, lockButton, 1)
         end
     end
 end)
@@ -641,11 +648,7 @@ task.spawn(function()
                     if stealPart and stealPart:IsA("BasePart") then
                         stealPart.CastShadow = false
                         if (StealGlitchMode == "Remote Touch" or StealGlitchMode == "Both") then
-                            if stealPart:FindFirstChildOfClass("TouchInterest") then
-                                firetouchinterest(Root, stealPart, 0)
-                                task.wait()
-                                firetouchinterest(Root, stealPart, 1)
-                            end
+                            fireSecureTouchInterest(stealPart)
                         end
                         if (StealGlitchMode == "Legacy Size" or StealGlitchMode == "Both") then
                             if not originalStealSizes[stealPart] then
@@ -702,11 +705,7 @@ task.spawn(function()
             if rainbowPart and rainbowPart:IsA("BasePart") then
                 rainbowPart.CastShadow = false 
                 if (RainbowGlitchMode == "Remote Touch" or RainbowGlitchMode == "Both") then
-                    if rainbowPart:FindFirstChildOfClass("TouchInterest") then
-                        firetouchinterest(Root, rainbowPart, 0)
-                        task.wait()
-                        firetouchinterest(Root, rainbowPart, 1)
-                    end
+                    fireSecureTouchInterest(rainbowPart)
                 end
                 if (RainbowGlitchMode == "Legacy Size" or RainbowGlitchMode == "Both") then
                     if not originalRainbowSizes[rainbowPart] then
@@ -749,7 +748,10 @@ NotifsEvent.OnClientEvent:Connect(function(message)
                 elseif not carryWeld and hadWeld then break
                 elseif not carryWeld and (tick() - startTimeL) > 5 then break end
                 
-                Root.CFrame = thiefRoot.CFrame * CFrame.new(0, 0, 2)
+                if Root:IsA("BasePart") then
+                    Root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                end
+                Root.CFrame = thiefRoot.CFrame * CFrame.new(0, 0, AntiStealBehindOffset)
                 if PunchEvent then PunchEvent:FireServer("Attack", false) end
                 task.wait(0.1)
             end
@@ -760,29 +762,92 @@ NotifsEvent.OnClientEvent:Connect(function(message)
     end
 end)
 
+-- Dedicated VirtualUser Loop for Anti-AFK Engine Continuity
+task.spawn(function()
+    while getgenv().BaseScriptTrackerKey == startTime do
+        if AntiAfkSystemToggled then
+            pcall(function()
+                VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+                task.wait(0.3)
+                VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+            end)
+        end
+        task.wait(15)
+    end
+end)
+
+-- Automated Initialization Processing for Default States
+task.spawn(function()
+    local t1 = PlayerScripts:FindFirstChild("Testing1")
+    local t2 = PlayerScripts:FindFirstChild("Testing2")
+    setScriptStateSecurely(t1, true)
+    setScriptStateSecurely(t2, true)
+    
+    task.spawn(function()
+        while getgenv().AntiCheatBypassToggled and getgenv().BaseScriptTrackerKey == startTime do
+            for _, obj in pairs(workspace:GetDescendants()) do
+                if obj:IsA("BasePart") and obj.Name == "FlyDetect" then
+                    if not originalFlyDetectSizes[obj] then originalFlyDetectSizes[obj] = obj.Size end
+                    obj.Size = Vector3.new(0.001, 0.001, 0.001)
+                end
+            end
+            task.wait(1)
+        end
+    end)
+    
+    task.spawn(function()
+        while AutoCollectToggled and getgenv().BaseScriptTrackerKey == startTime do
+            if Root and base then
+                local collectionPaths = {}
+                local c1 = base:FindFirstChild("CollectParts")
+                local f2 = base:FindFirstChild("Floor2")
+                local c2 = f2 and f2:FindFirstChild("CollectParts")
+                local f3 = base:FindFirstChild("Floor3")
+                local c3 = f3 and f3:FindFirstChild("CollectParts")
+                
+                if c1 then table.insert(collectionPaths, c1) end
+                if c2 then table.insert(collectionPaths, c2) end
+                if c3 then table.insert(collectionPaths, c3) end
+                
+                for _, parentFolder in ipairs(collectionPaths) do
+                    if not AutoCollectToggled or getgenv().BaseScriptTrackerKey ~= startTime then break end
+                    for _, child in pairs(parentFolder:GetChildren()) do
+                        local gui = child:FindFirstChild("CollectGui")
+                        local touchInterest = child:FindFirstChild("TouchInterest") or (child:IsA("BasePart") and child:FindFirstChildOfClass("TouchInterest"))
+                        if gui and gui.Enabled and touchInterest then
+                            firetouchinterest(Root, child, 0)
+                            task.wait()
+                            firetouchinterest(Root, child, 1)
+                        end
+                    end
+                end
+            end
+            task.wait(0.5)
+        end
+    end)
+end)
+
 -- ==========================================
--- GUI SETUP (RAYFIELD)
+-- GUI SETUP (RAYFIELD COMPACT ONE-TAB DESIGN)
 -- ==========================================
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
 local Window = Rayfield:CreateWindow({
-    Name = "Base & Combat Automation",
-    LoadingTitle = "Loading System...",
-    LoadingSubtitle = "by AI",
+    Name = "Base & Combat Automation Suite",
+    LoadingTitle = "Assembling Components...",
+    LoadingSubtitle = "CATSTAR Unified Engine",
     ConfigurationSaving = { Enabled = false }
 })
 
-local Tab = Window:CreateTab("Automation", nil)
-local SpinTab = Window:CreateTab("Spins & Settings", nil)
-local MovementTab = Window:CreateTab("Movement & Teleport", nil)
-local PlayerTrackingTab = Window:CreateTab("Player Tracking", nil)
+local UnifiedTab = Window:CreateTab("All Functions", nil)
 
 -- ==========================================
--- AUTOMATION TAB
+-- SECTION: COMBAT & INTERACTIVE DEFENSE
 -- ==========================================
+UnifiedTab:CreateSection("Combat & Defense Controls")
 
-Tab:CreateToggle({
-    Name = "Passive Extended Combat Multi-M1",
+UnifiedTab:CreateToggle({
+    Name = "Extended Multi-M1 Combat",
     CurrentValue = false,
     Flag = "PassiveCombat",
     Callback = function(Value)
@@ -796,15 +861,32 @@ Tab:CreateToggle({
     end,
 })
 
-Tab:CreateToggle({
-    Name = "Auto Lock Base",
+UnifiedTab:CreateToggle({
+    Name = "Anti Steal Defense Loop",
+    CurrentValue = true,
+    Flag = "AntiSteal",
+    Callback = function(Value) AntiStealToggled = Value end,
+})
+
+UnifiedTab:CreateSlider({
+    Name = "Thief Recall TP Offset Behind",
+    Range = {1, 30},
+    Increment = 1,
+    Suffix = "Studs",
+    CurrentValue = 5,
+    Flag = "ThiefBehindOffsetSlider",
+    Callback = function(Value) AntiStealBehindOffset = Value end,
+})
+
+UnifiedTab:CreateToggle({
+    Name = "Lock Base (RenderStepped Force)",
     CurrentValue = true,
     Flag = "AutoLockBase",
     Callback = function(Value) AutoLockToggled = Value end,
 })
 
-Tab:CreateSlider({
-    Name = "Base Lock Under Offset (Studs)",
+UnifiedTab:CreateSlider({
+    Name = "Base Lock Under-Offset Axis",
     Range = {0, 25},
     Increment = 1,
     Suffix = "Studs",
@@ -813,54 +895,22 @@ Tab:CreateSlider({
     Callback = function(Value) getgenv().BaseLockUnderOffset = Value end,
 })
 
-Tab:CreateToggle({
-    Name = "Auto Collect Money (All Floors)",
-    CurrentValue = false,
+-- ==========================================
+-- SECTION: TYCOON EXPLOITATIONS & ECONOMY
+-- ==========================================
+UnifiedTab:CreateSection("Tycoon & Economy Automation")
+
+UnifiedTab:CreateToggle({
+    Name = "Auto Collect Money Floors",
+    CurrentValue = true,
     Flag = "AutoCollect",
     Callback = function(Value)
         AutoCollectToggled = Value
-        task.spawn(function()
-            while AutoCollectToggled and getgenv().BaseScriptTrackerKey == startTime do
-                if Root and base then
-                    local collectionPaths = {}
-                    local c1 = base:FindFirstChild("CollectParts")
-                    local f2 = base:FindFirstChild("Floor2")
-                    local c2 = f2 and f2:FindFirstChild("CollectParts")
-                    local f3 = base:FindFirstChild("Floor3")
-                    local c3 = f3 and f3:FindFirstChild("CollectParts")
-                    
-                    if c1 then table.insert(collectionPaths, c1) end
-                    if c2 then table.insert(collectionPaths, c2) end
-                    if c3 then table.insert(collectionPaths, c3) end
-                    
-                    for _, parentFolder in ipairs(collectionPaths) do
-                        if not AutoCollectToggled or getgenv().BaseScriptTrackerKey ~= startTime then break end
-                        for _, child in pairs(parentFolder:GetChildren()) do
-                            local gui = child:FindFirstChild("CollectGui")
-                            local touchInterest = child:FindFirstChild("TouchInterest") or (child:IsA("BasePart") and child:FindFirstChildOfClass("TouchInterest"))
-                            if gui and gui.Enabled and touchInterest then
-                                firetouchinterest(Root, child, 0)
-                                task.wait()
-                                firetouchinterest(Root, child, 1)
-                            end
-                        end
-                    end
-                end
-                task.wait(0.5)
-            end
-        end)
     end,
 })
 
-Tab:CreateToggle({
-    Name = "Anti Steal Defense",
-    CurrentValue = true,
-    Flag = "AntiSteal",
-    Callback = function(Value) AntiStealToggled = Value end,
-})
-
-Tab:CreateToggle({
-    Name = "Disable Stealing (Resize My StealCollect to 0)",
+UnifiedTab:CreateToggle({
+    Name = "Block Base Thievery Entirely",
     CurrentValue = false,
     Flag = "DisableStealing",
     Callback = function(Value)
@@ -869,9 +919,86 @@ Tab:CreateToggle({
     end,
 })
 
-Tab:CreateToggle({
-    Name = "Anti Ragdoll + State Restructors",
+UnifiedTab:CreateDropdown({
+    Name = "Remote Touch Tracking Part Source",
+    Options = {"HumanoidRootPart", "Torso"},
+    CurrentOption = {"HumanoidRootPart"},
+    MultipleOptions = false,
+    Flag = "TouchPartDropdown",
+    Callback = function(Option) TouchOriginPart = Option[1] end,
+})
+
+UnifiedTab:CreateDropdown({
+    Name = "Steal Glitch System Execution Mode",
+    Options = {"Remote Touch", "Legacy Size", "Both"},
+    CurrentOption = {"Remote Touch"},
+    MultipleOptions = false,
+    Flag = "StealModeDropdown",
+    Callback = function(Option)
+        StealGlitchMode = Option[1]
+        resetStealGlitchProperties()
+    end,
+})
+
+UnifiedTab:CreateToggle({
+    Name = "Auto Steal Glitch Engine",
     CurrentValue = false,
+    Flag = "StealGlitch",
+    Callback = function(Value)
+        StealGlitchToggled = Value
+        if not Value then resetStealGlitchProperties() end
+    end,
+})
+
+UnifiedTab:CreateDropdown({
+    Name = "Rainbow Glitch System Execution Mode",
+    Options = {"Remote Touch", "Legacy Size", "Both"},
+    CurrentOption = {"Remote Touch"},
+    MultipleOptions = false,
+    Flag = "RainbowModeDropdown",
+    Callback = function(Option)
+        RainbowGlitchMode = Option[1]
+        resetRainbowGlitchProperties()
+    end,
+})
+
+UnifiedTab:CreateToggle({
+    Name = "Auto Rainbow Steal Engine",
+    CurrentValue = false,
+    Flag = "RainbowGlitch",
+    Callback = function(Value)
+        RainbowGlitchToggled = Value
+        if not Value then resetRainbowGlitchProperties() end
+    end,
+})
+
+UnifiedTab:CreateDropdown({
+    Name = "Auto Craft Structural Category Filter",
+    Options = {"Characters", "RainbowCharacters", "CosmicCharacters"},
+    CurrentOption = {"Characters"},
+    MultipleOptions = true,
+    Flag = "CraftFoldersDropdown",
+    Callback = function(Options)
+        table.clear(ActiveCraftFolders)
+        for _, selectedOption in ipairs(Options) do ActiveCraftFolders[selectedOption] = true end
+    end,
+})
+
+UnifiedTab:CreateToggle({
+    Name = "Enable Tycoon Auto Craft Loop",
+    CurrentValue = false,
+    Flag = "AutoCraftToggle",
+    Callback = function(Value) AutoCraftToggled = Value end,
+})
+
+-- ==========================================
+-- SECTION: CLIENT MODIFIERS & ENVIRONMENT
+-- ==========================================
+UnifiedTab:CreateSection("Client Modifiers & Bypass Engine")
+
+UnifiedTab:CreateToggle({
+    Name = "Anti Ragdoll + State Restoration",
+    CurrentValue = true,
     Flag = "AntiRagdoll",
     Callback = function(Value)
         getgenv().AntiRagdollToggled = Value
@@ -885,139 +1012,17 @@ Tab:CreateToggle({
     end,
 })
 
-Tab:CreateDropdown({
-    Name = "Auto Craft Folder Filter",
-    Options = {"Characters", "RainbowCharacters", "CosmicCharacters"},
-    CurrentOption = {"Characters"},
-    MultipleOptions = true,
-    Flag = "CraftFoldersDropdown",
-    Callback = function(Options)
-        table.clear(ActiveCraftFolders)
-        for _, selectedOption in ipairs(Options) do ActiveCraftFolders[selectedOption] = true end
-    end,
-})
-
-Tab:CreateToggle({
-    Name = "Enable Auto Craft Pairings",
-    CurrentValue = false,
-    Flag = "AutoCraftToggle",
-    Callback = function(Value) AutoCraftToggled = Value end,
-})
-
-Tab:CreateDropdown({
-    Name = "Steal Glitch Method Mode",
-    Options = {"Remote Touch", "Legacy Size", "Both"},
-    CurrentOption = {"Remote Touch"},
-    MultipleOptions = false,
-    Flag = "StealModeDropdown",
-    Callback = function(Option)
-        StealGlitchMode = Option[1]
-        resetStealGlitchProperties()
-    end,
-})
-
-Tab:CreateToggle({
-    Name = "Auto Steal Glitch (StealCollect 1 & 2)",
-    CurrentValue = false,
-    Flag = "StealGlitch",
-    Callback = function(Value)
-        StealGlitchToggled = Value
-        if not Value then resetStealGlitchProperties() end
-    end,
-})
-
-Tab:CreateDropdown({
-    Name = "Rainbow Glitch Method Mode",
-    Options = {"Remote Touch", "Legacy Size", "Both"},
-    CurrentOption = {"Remote Touch"},
-    MultipleOptions = false,
-    Flag = "RainbowModeDropdown",
-    Callback = function(Option)
-        RainbowGlitchMode = Option[1]
-        resetRainbowGlitchProperties()
-    end,
-})
-
-Tab:CreateToggle({
-    Name = "Auto Rainbow Steal Glitch",
-    CurrentValue = false,
-    Flag = "RainbowGlitch",
-    Callback = function(Value)
-        RainbowGlitchToggled = Value
-        if not Value then resetRainbowGlitchProperties() end
-    end,
-})
-
--- ==========================================
--- SPINS & SETTINGS TAB
--- ==========================================
-
-SpinTab:CreateButton({
-    Name = "Single Spin Request",
-    Callback = function() if SpinRequestEvent then SpinRequestEvent:FireServer() end end,
-})
-
-SpinTab:CreateToggle({
-    Name = "Auto Spin (Script Loop)",
-    CurrentValue = false,
-    Flag = "ScriptAutoSpin",
-    Callback = function(Value) ScriptAutoSpinToggled = Value end,
-})
-
-SpinTab:CreateToggle({
-    Name = "Game Settings: AutoSpin Toggle Remote",
-    CurrentValue = false,
-    Flag = "GameSettingsAutoSpin",
-    Callback = function(Value) if SettingsEvent then SettingsEvent:FireServer("AutoSpin", Value) end end,
-})
-
-SpinTab:CreateToggle({
-    Name = "Anti AFK (Inverts Core AFK Logic Checks)",
-    CurrentValue = false,
-    Flag = "AntiAfkLogicToggle",
-    Callback = function(Value)
-        AntiAfkSystemToggled = Value
-        local afkScript = PlayerScripts:FindFirstChild("AFK")
-        if afkScript then
-            setScriptStateSecurely(afkScript, Value)
-        end
-    end,
-})
-
--- ==========================================
--- MOVEMENT & ANTI-CHEAT TAB
--- ==========================================
-
-MovementTab:CreateToggle({
-    Name = "Enable AntiCheat Bypass & Custom Modifiers",
-    CurrentValue = false,
+UnifiedTab:CreateToggle({
+    Name = "Security AntiCheat Internal Bypass",
+    CurrentValue = true,
     Flag = "AntiCheatBypassToggle",
     Callback = function(Value)
         getgenv().AntiCheatBypassToggled = Value
-        
         local t1 = PlayerScripts:FindFirstChild("Testing1")
         local t2 = PlayerScripts:FindFirstChild("Testing2")
         setScriptStateSecurely(t1, Value)
         setScriptStateSecurely(t2, Value)
         
-        task.spawn(function()
-            while getgenv().AntiCheatBypassToggled and getgenv().BaseScriptTrackerKey == startTime do
-                for _, obj in pairs(workspace:GetDescendants()) do
-                    if obj:IsA("BasePart") and obj.Name == "FlyDetect" then
-                        if not originalFlyDetectSizes[obj] then originalFlyDetectSizes[obj] = obj.Size end
-                        obj.Size = Vector3.new(0.001, 0.001, 0.001)
-                    end
-                end
-                task.wait(1)
-            end
-            if not getgenv().AntiCheatBypassToggled then
-                for part, originalSize in pairs(originalFlyDetectSizes) do
-                    if part and part.Parent then part.Size = originalSize end
-                end
-                table.clear(originalFlyDetectSizes)
-            end
-        end)
-
         if not Value and Humanoid then
             Humanoid.WalkSpeed = originalWalkSpeedValue
             if Humanoid.UseJumpPower then Humanoid.JumpPower = originalJumpPowerValue
@@ -1026,8 +1031,8 @@ MovementTab:CreateToggle({
     end,
 })
 
-MovementTab:CreateSlider({
-    Name = "Set WalkSpeed Target",
+UnifiedTab:CreateSlider({
+    Name = "Custom WalkSpeed Target Value",
     Range = {16, 250},
     Increment = 1,
     Suffix = "Speed",
@@ -1039,8 +1044,8 @@ MovementTab:CreateSlider({
     end,
 })
 
-MovementTab:CreateSlider({
-    Name = "Set Jump Power / Height Target",
+UnifiedTab:CreateSlider({
+    Name = "Custom Jump Power/Height Value",
     Range = {0, 500},
     Increment = 1,
     Suffix = "Jump",
@@ -1055,8 +1060,38 @@ MovementTab:CreateSlider({
     end,
 })
 
-MovementTab:CreateButton({
-    Name = "TP Back to Base (Lock Button)",
+UnifiedTab:CreateToggle({
+    Name = "Anti AFK Connectivity Keep-Alive",
+    CurrentValue = false,
+    Flag = "AntiAfkLogicToggle",
+    Callback = function(Value)
+        AntiAfkSystemToggled = Value
+        local afkScript = PlayerScripts:FindFirstChild("AFK")
+        if afkScript then
+            setScriptStateSecurely(afkScript, Value)
+        end
+    end,
+})
+
+UnifiedTab:CreateToggle({
+    Name = "Game Core Remote AutoSpin Trigger",
+    CurrentValue = false,
+    Flag = "GameSettingsAutoSpin",
+    Callback = function(Value) if SettingsEvent then SettingsEvent:FireServer("AutoSpin", Value) end end,
+})
+
+UnifiedTab:CreateButton({
+    Name = "Request Instant Single Spin Remotely",
+    Callback = function() if SpinRequestEvent then SpinRequestEvent:FireServer() end end,
+})
+
+-- ==========================================
+-- SECTION: NAVIGATION & INSTANT TELEPORTATION
+-- ==========================================
+UnifiedTab:CreateSection("Navigation & Teleport Hub")
+
+UnifiedTab:CreateButton({
+    Name = "Return to Self Base Lock Button",
     Callback = function()
         if Root and base then
             local lockButton = base:FindFirstChild("LockButton")
@@ -1065,8 +1100,8 @@ MovementTab:CreateButton({
     end,
 })
 
-MovementTab:CreateButton({
-    Name = "TP to Front of My Base (UnlockBase)",
+UnifiedTab:CreateButton({
+    Name = "Return to Self Base Unlock Gate",
     Callback = function()
         if Root and base then
             local unlockBase = base:FindFirstChild("UnlockBase")
@@ -1090,12 +1125,16 @@ local function rebuildBaseOptions()
 end
 
 rebuildBaseOptions()
-local selectedBaseTargetDisplay = baseOptions[1] or "All"
+local initialCurrentSelectBaseDisplay = "All"
+local selfBaseFolder = BasesFolder:FindFirstChild(tostring(LocalPlayer:GetAttribute("Base")))
+if selfBaseFolder then
+    initialCurrentSelectBaseDisplay = getBaseOwnerAndName(selfBaseFolder)
+end
 
-local BaseDropdown = MovementTab:CreateDropdown({
-    Name = "Select Base Target (Owner Display)",
+local BaseDropdown = UnifiedTab:CreateDropdown({
+    Name = "Select Base Target Coordinate Location",
     Options = baseOptions,
-    CurrentOption = {selectedBaseTargetDisplay},
+    CurrentOption = {initialCurrentSelectBaseDisplay},
     MultipleOptions = false,
     Flag = "BaseDropdown",
     Callback = function(Option) selectedBaseTargetDisplay = Option[1] end,
@@ -1109,8 +1148,8 @@ end
 BasesFolder.ChildAdded:Connect(refreshUIFriendlyDropdown)
 BasesFolder.ChildRemoved:Connect(refreshUIFriendlyDropdown)
 
-MovementTab:CreateButton({
-    Name = "TP to Selected Base (Lock Button)",
+UnifiedTab:CreateButton({
+    Name = "Teleport to Selected Base Lock Button",
     Callback = function()
         if not Root then return end
         local targetRealName = baseMapping[selectedBaseTargetDisplay]
@@ -1122,8 +1161,8 @@ MovementTab:CreateButton({
     end,
 })
 
-MovementTab:CreateButton({
-    Name = "TP to Front of Selected Base (UnlockBase)",
+UnifiedTab:CreateButton({
+    Name = "Teleport to Selected Base Front Gate",
     Callback = function()
         if not Root then return end
         local targetRealName = baseMapping[selectedBaseTargetDisplay]
@@ -1135,8 +1174,8 @@ MovementTab:CreateButton({
     end,
 })
 
-MovementTab:CreateDropdown({
-    Name = "Auto TP Targeting Config",
+UnifiedTab:CreateDropdown({
+    Name = "Auto Unlocked Teleport Filtering Array",
     Options = baseOptions,
     CurrentOption = {"All"},
     MultipleOptions = false,
@@ -1147,15 +1186,15 @@ MovementTab:CreateDropdown({
     end,
 })
 
-MovementTab:CreateToggle({
-    Name = "Auto TP to Unlocked Base",
+UnifiedTab:CreateToggle({
+    Name = "Loop Teleport Unlocked Competitor Bases",
     CurrentValue = false,
     Flag = "AutoTpUnlocked",
     Callback = function(Value) autoTpUnlockedToggled = Value end,
 })
 
-MovementTab:CreateButton({
-    Name = "Rejoin Server",
+UnifiedTab:CreateButton({
+    Name = "Force Instant Protocol Server Rejoin",
     Callback = function()
         if #Players:GetPlayers() <= 1 then TeleportService:Teleport(game.PlaceId, LocalPlayer)
         else TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer) end
@@ -1163,11 +1202,12 @@ MovementTab:CreateButton({
 })
 
 -- ==========================================
--- PLAYER TRACKING TAB
+-- SECTION: ENTITY TRACKING & AUTOMATED ASSIGNMENT
 -- ==========================================
+UnifiedTab:CreateSection("Target Character Tracking Loops")
 
-PlayerTrackingTab:CreateDropdown({
-    Name = "Multi-Select Target Characters",
+UnifiedTab:CreateDropdown({
+    Name = "Multi-Select Target Validation Registry",
     Options = getReplicatedCharactersList(),
     CurrentOption = {},
     MultipleOptions = true,
@@ -1178,8 +1218,8 @@ PlayerTrackingTab:CreateDropdown({
     end,
 })
 
-PlayerTrackingTab:CreateSlider({
-    Name = "Target Character TP Y-Offset",
+UnifiedTab:CreateSlider({
+    Name = "Auto Buy Target Y-Offset Shift",
     Range = {-10, 50},
     Increment = 1,
     Suffix = "Studs",
@@ -1190,8 +1230,8 @@ PlayerTrackingTab:CreateSlider({
     end,
 })
 
-PlayerTrackingTab:CreateSlider({
-    Name = "Minimum Allowed TP Y-Floor",
+UnifiedTab:CreateSlider({
+    Name = "Minimum Allowed Ground Safety Height Floor",
     Range = {-100, 20},
     Increment = 1,
     Suffix = "Y-Height",
@@ -1202,29 +1242,29 @@ PlayerTrackingTab:CreateSlider({
     end,
 })
 
-PlayerTrackingTab:CreateToggle({
-    Name = "Auto TP Loop: Walking Characters",
+UnifiedTab:CreateToggle({
+    Name = "Auto TP Loop: Map Spawned Models",
     CurrentValue = false,
     Flag = "AutoTpWalkingChar",
     Callback = function(Value) AutoTpWalkingCharToggled = Value end,
 })
 
-PlayerTrackingTab:CreateToggle({
-    Name = "Auto TP Loop: Base Characters",
+UnifiedTab:CreateToggle({
+    Name = "Auto TP Loop: Base Placed Models",
     CurrentValue = false,
     Flag = "AutoTpBaseChar",
     Callback = function(Value) AutoTpBaseCharToggled = Value end,
 })
 
-PlayerTrackingTab:CreateToggle({
-    Name = "Interaction: Auto-Buy Character (BuyPrompt)",
+UnifiedTab:CreateToggle({
+    Name = "Action Mapping: Auto Interact BuyPrompt",
     CurrentValue = false,
     Flag = "AutoBuyPromptToggle",
     Callback = function(Value) AutoBuyOnTpEnabled = Value end,
 })
 
-PlayerTrackingTab:CreateToggle({
-    Name = "Interaction: Auto-Steal Character (StealPrompt)",
+UnifiedTab:CreateToggle({
+    Name = "Action Mapping: Auto Interact StealPrompt",
     CurrentValue = false,
     Flag = "AutoStealPromptToggle",
     Callback = function(Value) AutoStealOnTpEnabled = Value end,
