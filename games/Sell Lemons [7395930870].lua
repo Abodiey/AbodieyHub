@@ -8,7 +8,7 @@ end
 
 _G.AutoClick = not _G.AutoClick
 local Click = tycoon.Remotes.WakeIncomeStream
-while _G.AutoClick do
+while _G.AutoClick and not tycoon.Purchases["Lemon Stand"].Other:FindFirstChild("Cash Register") do
     Click:InvokeServer("LemonStand")
     task.wait(.9)
 end
