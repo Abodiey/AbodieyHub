@@ -23,7 +23,6 @@ local fallbackId = tostring(game.PlaceId)
 local http = cloneref(game:GetService("HttpService"))
 
 local api = "https://api.github.com/repos/Abodiey/AbodieyHub/contents/games"
-local raw = "https://raw.githubusercontent.com/Abodiey/AbodieyHub/main/games/"
 local configFile = "AbodieyHub_Toggles.json"
 
 -- Helper function to format massive metrics cleanly (e.g., 10,500 -> 10.5K)
@@ -40,21 +39,25 @@ end
 
 -- Helper functions for local file-system persistence
 local function loadSavedToggles()
-    local t = {
-        toggles = {},     -- Controls if a script runs at all
-        askBefore = {}    -- Controls if it needs approval before firing
+    local defaultStructure = {
+        disabled = {},     -- Tracks explicitly disabled scripts (default is false/nil)
+        askBefore = {}    -- Controls if it needs approval before firing (default is false/nil)
     }
+    
     local readSuccess, content = pcall(function()
         return readfile(configFile)
     end)
+    
     if readSuccess and content then
         pcall(function()
             local decoded = http:JSONDecode(content)
-            if decoded.toggles then t.toggles = decoded.toggles end
-            if decoded.askBefore then t.askBefore = decoded.askBefore end
+            if type(decoded) == "table" then
+                if type(decoded.disabled) == "table" then defaultStructure.disabled = decoded.disabled end
+                if type(decoded.askBefore) == "table" then defaultStructure.askBefore = decoded.askBefore end
+            end
         end)
     end
-    return t
+    return defaultStructure
 end
 
 local function saveToggles(t)
@@ -192,11 +195,13 @@ if success and response then
 
     if decodeSuccess and type(fileArray) == "table" then
         local parsedInventory = {}
-        local currentMatchedScripts = {}
+        local currentMatchedScripts = {} -- Maps fileName string to the full API file dictionary object
+        local configUpdated = false
 
         for _, file in ipairs(fileArray) do
             local name = file.name
-            local matchedId = name:match("%d+")
+            
+            local matchedId = name:match("%[%s*(%d+)%s*%]") or name:match("(%d%d%d%d%d+)")
             
             if matchedId then
                 if not parsedInventory[matchedId] then
@@ -205,15 +210,24 @@ if success and response then
                 table.insert(parsedInventory[matchedId], name)
             end
 
-            if name:find(currentId) or name:find(fallbackId) then
-                table.insert(currentMatchedScripts, name)
+            if name:find(currentId, 1, true) or name:find(fallbackId, 1, true) then
+                currentMatchedScripts[name] = file
             end
 
-            -- Ensure core mapping fields are verified cleanly
-            if configDb.toggles[name] == nil then configDb.toggles[name] = true end
-            if configDb.askBefore[name] == nil then configDb.askBefore[name] = false end
+            -- Defaults config cleanup logic
+            if configDb.disabled[name] == nil then 
+                configDb.disabled[name] = false 
+                configUpdated = true
+            end
+            if configDb.askBefore[name] == nil then 
+                configDb.askBefore[name] = false 
+                configUpdated = true
+            end
         end
-        saveToggles(configDb)
+        
+        if configUpdated then
+            saveToggles(configDb)
+        end
 
         -- ====================================================
         -- PATH A: GUI CONFIGURATION MODE (Pure Management)
@@ -238,26 +252,27 @@ if success and response then
             CurrentTab:CreateLabel("🔥 Active: " .. activeDetails.playing .. " | 👍 Likes: " .. activeDetails.likes .. " | 👎 Dislikes: " .. activeDetails.dislikes)
             
             CurrentTab:CreateSection("Associated Script Profiles")
-            if #currentMatchedScripts > 0 then
-                for _, fileName in ipairs(currentMatchedScripts) do
-                    CurrentTab:CreateToggle({
-                        Name = "Enable Script: " .. fileName,
-                        CurrentValue = configDb.toggles[fileName],
-                        Callback = function(Value)
-                            configDb.toggles[fileName] = Value
-                            saveToggles(configDb)
-                        end,
-                    })
-                    CurrentTab:CreateToggle({
-                        Name = "└─ Ask Before Running",
-                        CurrentValue = configDb.askBefore[fileName],
-                        Callback = function(Value)
-                            configDb.askBefore[fileName] = Value
-                            saveToggles(configDb)
-                        end,
-                    })
-                end
-            else
+            local activeCount = 0
+            for fileName, _ in pairs(currentMatchedScripts) do
+                activeCount = activeCount + 1
+                CurrentTab:CreateToggle({
+                    Name = "Disable Script: " .. fileName,
+                    CurrentValue = configDb.disabled[fileName],
+                    Callback = function(Value)
+                        configDb.disabled[fileName] = Value
+                        saveToggles(configDb)
+                    end,
+                })
+                CurrentTab:CreateToggle({
+                    Name = "└─ Ask Before Running",
+                    CurrentValue = configDb.askBefore[fileName] or false,
+                    Callback = function(Value)
+                        configDb.askBefore[fileName] = Value
+                        saveToggles(configDb)
+                    end,
+                })
+            end
+            if activeCount == 0 then
                 CurrentTab:CreateLabel("No assets found matching this game environment.")
             end
 
@@ -273,16 +288,16 @@ if success and response then
                 
                 for _, fileName in ipairs(files) do
                     InventoryTab:CreateToggle({
-                        Name = "Enable: " .. fileName,
-                        CurrentValue = configDb.toggles[fileName],
+                        Name = "Disable: " .. fileName,
+                        CurrentValue = configDb.disabled[fileName],
                         Callback = function(Value)
-                            configDb.toggles[fileName] = Value
+                            configDb.disabled[fileName] = Value
                             saveToggles(configDb)
                         end,
                     })
                     InventoryTab:CreateToggle({
                         Name = "   └─ Ask Before Running",
-                        CurrentValue = configDb.askBefore[fileName],
+                        CurrentValue = configDb.askBefore[fileName] or false,
                         Callback = function(Value)
                             configDb.askBefore[fileName] = Value
                             saveToggles(configDb)
@@ -305,17 +320,20 @@ if success and response then
         -- PATH B: SILENT EXECUTION MODE (Executes Target Modules)
         -- ====================================================
         else
-            for _, fileName in ipairs(currentMatchedScripts) do
-                if configDb.toggles[fileName] == true then
-                    -- Verify if user triggered "Ask Before Running" requirement flag
+            for fileName, fileData in pairs(currentMatchedScripts) do
+                local isDisabled = configDb.disabled[fileName]
+                
+                if not isDisabled then
                     local allowExecution = true
-                    if configDb.askBefore[fileName] == true then
+                    local askConfig = configDb.askBefore[fileName]
+                    
+                    if askConfig == true then
                         allowExecution = createVerificationPrompt(fileName)
                     end
 
-                    if allowExecution then
+                    if allowExecution and fileData.download_url then
                         local contentSuccess, content = pcall(function()
-                            return game:HttpGet(raw .. fileName)
+                            return game:HttpGet(fileData.download_url)
                         end)
 
                         if contentSuccess and content then
