@@ -20,9 +20,24 @@ local root = character:FindFirstChild("HumanoidRootPart")
 -- Folder, Remote & Map References
 local Honeycombs = workspace.InteractiveEvents.QueenBee.RuntimeHoneycombs
 local SellEvent = ReplicatedStorage.Remotes.SellCrates
+local RemovePlantEvent = ReplicatedStorage.Remotes.RemovePlant
 local ShootRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PlantRush"):WaitForChild("Shoot")
 local RuntimeFolder = workspace:WaitForChild("InteractiveEvents").PlantRush.Runtime
 local rollPrompt = workspace.Map.Plots:FindFirstChild("RollSeeds", true)
+
+-- Constant Plot Tracking setup immediately after rollPrompt
+local plot = nil
+if rollPrompt then
+    local plotsFolder = workspace.Map.Plots
+    local current = rollPrompt
+    while current and current ~= workspace do
+        if current.Parent == plotsFolder then
+            plot = current
+            break
+        end
+        current = current.Parent
+    end
+end
 
 -- Fast local variables for toggles
 local autoSellEnabled = true
@@ -30,6 +45,7 @@ local autoHoneycombEnabled = true
 local autoShootEnabled = true
 local autoRollEnabled = false
 local autoBuyEnabled = false
+local autoEquipEnabled = false
 local disableManualRoll = false
 local disableManualBuy = false
 local antiAfkEnabled = true
@@ -144,7 +160,7 @@ local function startAutoFarm()
                 end
             end
 
-            -- Priority 2: Look for Honeycomb (Using updated fixed path structure)
+            -- Priority 2: Look for Honeycomb
             if not targetPrompt then
                 for _, hc in pairs(Honeycombs:GetChildren()) do
                     local honeycombPart = hc:FindFirstChild("Honeycomb")
@@ -203,7 +219,6 @@ local function startAutoRoll()
             end
             
             if not goodSeedPresent and rollPrompt then
-                -- Direct automated script access ignores prompt execution blocks
                 fireproximityprompt(rollPrompt)
             end
             
@@ -218,7 +233,6 @@ local function startAutoBuy()
         while autoBuyEnabled and ScriptID == CurrentScriptID do
             for targetSeed, _ in pairs(activeGoodSeeds) do
                 if targetSeed and targetSeed.Parent then
-                    -- Adaptive structural parsing logic for seed model definitions
                     local buyPrompt = nil
                     
                     local union = targetSeed:FindFirstChild("Union")
@@ -241,6 +255,47 @@ local function startAutoBuy()
                 end
             end
             task.wait(0.1)
+        end
+    end)
+end
+
+-- LOOP 6: Auto Equip Best Seed Loop
+local function startAutoEquip()
+    task.spawn(function()
+        while autoEquipEnabled and ScriptID == CurrentScriptID do
+            if Seeds then
+                local currentCharacter = Player.Character or character
+                local humanoid = currentCharacter:FindFirstChildOfClass("Humanoid")
+                local backpack = Player:FindFirstChild("Backpack")
+                
+                if humanoid and backpack then
+                    local bestTool = nil
+                    local highestIndex = -1
+
+                    local function scanContainer(container)
+                        for _, tool in ipairs(container:GetChildren()) do
+                            if tool:IsA("Tool") then
+                                for index = 1, #OrderedSeeds do
+                                    local seedName = OrderedSeeds[index]
+                                    if seedName and string.find(tool.Name, "^" .. seedName) and index > highestIndex then
+                                        highestIndex = index
+                                        bestTool = tool
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                    end
+
+                    scanContainer(backpack)
+                    scanContainer(currentCharacter)
+
+                    if bestTool and bestTool.Parent ~= currentCharacter then
+                        humanoid:EquipTool(bestTool)
+                    end
+                end
+            end
+            task.wait(1)
         end
     end)
 end
@@ -303,6 +358,16 @@ MainTab:CreateToggle({
     end,
 })
 
+MainTab:CreateToggle({
+    Name = "Auto Equip Best Seed",
+    CurrentValue = autoEquipEnabled,
+    Flag = "AutoEquipToggle",
+    Callback = function(Value)
+        autoEquipEnabled = Value
+        if Value then startAutoEquip() end
+    end,
+})
+
 -- Dynamic Label tracking your selections safely
 local RarityLabel = MainTab:CreateLabel("Selected Min Tier: None")
 
@@ -357,7 +422,6 @@ MainTab:CreateToggle({
     Flag = "DisableBuyToggle",
     Callback = function(Value)
         disableManualBuy = Value
-        -- Dynamically cycle map elements to toggle prompt visibility
         for _, instance in ipairs(CollectionService:GetTagged("FloatSeed")) do
             local buyPrompt = instance:FindFirstChild("BuySeed", true)
             if buyPrompt then
@@ -381,75 +445,53 @@ MainTab:CreateSection("--- Utilities ---")
 MainTab:CreateButton({
     Name = "Teleport to Plot",
     Callback = function()
-        if not rollPrompt then 
-            Rayfield:Notify({Title = "Error", Content = "RollSeeds prompt not found on the map!", Duration = 3})
+        if not plot then 
+            Rayfield:Notify({Title = "Error", Content = "Your Plot instance could not be determined at startup!", Duration = 3})
             return 
         end
         if not root or not root.Parent then return end
 
-        -- Climb ancestors until the parent is workspace.Plots
-        local plotsFolder = workspace.Map.Plots
-        local current = rollPrompt
-        local plot = nil
-
-        while current and current ~= workspace do
-            if current.Parent == plotsFolder then
-                plot = current
-                break
-            end
-            current = current.Parent
-        end
-
-        if plot then
-            local spawnPoint = plot:FindFirstChild("OwnerSpawnPoint", true)
-            if spawnPoint and spawnPoint:IsA("Attachment") then
-                root.CFrame = spawnPoint.WorldCFrame
-            elseif spawnPoint and spawnPoint:IsA("BasePart") then
-                root.CFrame = spawnPoint.CFrame + Vector3.new(0, 3, 0)
-            else
-                Rayfield:Notify({Title = "Error", Content = "OwnerSpawnPoint structure missing from plot!", Duration = 3})
-            end
+        local spawnPoint = plot:FindFirstChild("OwnerSpawnPoint", true)
+        if spawnPoint and spawnPoint:IsA("Attachment") then
+            root.CFrame = spawnPoint.WorldCFrame
+        elseif spawnPoint and spawnPoint:IsA("BasePart") then
+            root.CFrame = spawnPoint.CFrame + Vector3.new(0, 3, 0)
         else
-            Rayfield:Notify({Title = "Error", Content = "Could not track down your plot instance!", Duration = 3})
+            Rayfield:Notify({Title = "Error", Content = "OwnerSpawnPoint structure missing from plot!", Duration = 3})
         end
     end,
 })
 
 MainTab:CreateButton({
-    Name = "Equip Best Seed",
+    Name = "Clear All Plants",
     Callback = function()
-        if not Seeds then return end
-        
-        local currentCharacter = Player.Character or character
-        local humanoid = currentCharacter:FindFirstChildOfClass("Humanoid")
-        local backpack = Player:FindFirstChild("Backpack")
-        
-        if not humanoid or not backpack then return end
-        
-        local bestTool = nil
-        local highestIndex = -1
+        if not plot then
+            Rayfield:Notify({Title = "Error", Content = "Plot not found, cannot clear plants!", Duration = 3})
+            return
+        end
 
-        local function scanContainer(container)
-            for _, tool in ipairs(container:GetChildren()) do
-                if tool:IsA("Tool") then
-                    for index = 1, #OrderedSeeds do
-                        local seedName = OrderedSeeds[index]
-                        if seedName and string.find(tool.Name, "^" .. seedName) and index > highestIndex then
-                            highestIndex = index
-                            bestTool = tool
-                            break
-                        end
-                    end
+        local farmPlot = plot:FindFirstChild("FarmPlot")
+        if not farmPlot then
+            Rayfield:Notify({Title = "Error", Content = "FarmPlot folder missing from your plot!", Duration = 3})
+            return
+        end
+
+        task.spawn(function()
+            local x = -1
+            while x ~= 0 do
+                x = 0
+                for _, v in pairs(farmPlot:GetChildren()) do
+                    if not v:FindFirstChild("Dirt") then continue end
+                    if not v.Dirt:FindFirstChildOfClass("Model") then continue end
+                    
+                    x = x + 1
+                    RemovePlantEvent:FireServer(v.Dirt)
+                    task.wait(0.15)
                 end
+                task.wait()
             end
-        end
-
-        scanContainer(backpack)
-        scanContainer(currentCharacter)
-
-        if bestTool and bestTool.Parent ~= currentCharacter then
-            humanoid:EquipTool(bestTool)
-        end
+            Rayfield:Notify({Title = "Success", Content = "All plants cleared successfully!", Duration = 3})
+        end)
     end,
 })
 
