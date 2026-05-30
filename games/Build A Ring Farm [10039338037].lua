@@ -37,6 +37,14 @@ local AutoRollIndex = 1
 local goodSeedPresent = false 
 local activeGoodSeeds = {}
 
+-- Pre-order seed data if it exists for fast execution later
+local OrderedSeeds = {}
+if Seeds then
+    for seedName, seedData in pairs(Seeds) do
+        OrderedSeeds[seedData.index] = seedName
+    end
+end
+
 Player.CharacterAdded:Connect(function(char)
     character = char
     root = char:WaitForChild("HumanoidRootPart")
@@ -115,6 +123,8 @@ end
 -- LOOP 2: Auto Farm Loop (Honeycombs & Plant Drops)
 local function startAutoFarm()
     task.spawn(function()
+        local previousCFrame = nil -- Store original position here
+
         while autoHoneycombEnabled and ScriptID == CurrentScriptID do
             if not root or not root.Parent then task.wait(0.5) continue end
 
@@ -138,11 +148,23 @@ local function startAutoFarm()
             end
 
             if targetPrompt and targetPrompt.Parent then
+                -- Save current location before moving (only if we haven't cached it already)
+                if not previousCFrame then
+                    previousCFrame = root.CFrame
+                end
+
+                -- Teleport and process the target
                 root.CFrame = CFrame.new(targetPrompt.Parent.Position) * root.CFrame.Rotation
                 task.wait(0.2)
                 fireproximityprompt(targetPrompt)
                 task.wait(0.1)
             else
+                -- Return to original spot if a location was saved and no targets remain
+                if previousCFrame then
+                    root.CFrame = previousCFrame
+                    previousCFrame = nil -- Clear cache so it can save your next new location later
+                    task.wait(0.2)
+                end
                 task.wait(0.1)
             end
         end
@@ -265,6 +287,44 @@ UtilTab:CreateToggle({
     Flag = "AntiAfkToggle",
     Callback = function(Value)
         antiAfkEnabled = Value
+    end,
+})
+
+UtilTab:CreateButton({
+    Name = "Equip Best Seed",
+    Callback = function()
+        if not Seeds then return end
+        
+        local currentCharacter = Player.Character or character
+        local humanoid = currentCharacter:FindFirstChildOfClass("Humanoid")
+        local backpack = Player:FindFirstChild("Backpack")
+        
+        if not humanoid or not backpack then return end
+        
+        local bestTool = nil
+        local highestIndex = -1
+
+        local function scanContainer(container)
+            for _, tool in ipairs(container:GetChildren()) do
+                if tool:IsA("Tool") then
+                    for index = 1, #OrderedSeeds do
+                        local seedName = OrderedSeeds[index]
+                        if string.find(tool.Name, "^" .. seedName) and index > highestIndex then
+                            highestIndex = index
+                            bestTool = tool
+                            break
+                        end
+                    end
+                end
+            end
+        end
+
+        scanContainer(backpack)
+        scanContainer(currentCharacter)
+
+        if bestTool and bestTool.Parent ~= currentCharacter then
+            humanoid:EquipTool(bestTool)
+        end
     end,
 })
 
