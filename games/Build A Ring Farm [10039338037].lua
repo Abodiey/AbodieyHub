@@ -2,9 +2,6 @@
 getgenv().ScriptID = os.clock()
 local CurrentScriptID = ScriptID
 
--- 1. Load the Seeds Data Table for Auto Roll/Buy
-local Seeds = loadstring(game:HttpGet("https://raw.githubusercontent.com/Abodiey/AbodieyHub/refs/heads/main/helpers/Build%20A%20Ring%20Farm%20%5B10039338037%5D.lua"))()
-
 -- Load Rayfield Library
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
@@ -16,6 +13,13 @@ local Players = cloneref(game:GetService("Players"))
 local Player = Players.LocalPlayer
 local character = Player.Character or Player.CharacterAdded:Wait()
 local root = character:FindFirstChild("HumanoidRootPart")
+
+-- Shared Utilities & Registries
+local SharedUtils = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedUtils"))
+local PlantsRegistry = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Registry"):WaitForChild("Plants")
+local Seeds = require(PlantsRegistry)
+local OrderedSeeds = Seeds.GetPlantsForIndex()
+Seeds.GetPlantsForIndex = nil -- Clean up the function reference from the module table copy
 
 -- Folder, Remote & Map References
 local Honeycombs = workspace.InteractiveEvents.QueenBee.RuntimeHoneycombs
@@ -50,26 +54,44 @@ local disableManualRoll = false
 local disableManualBuy = false
 local antiAfkEnabled = true
 
+-- Advanced Economic & Strategy Variables
+local lowCashStrategy = "Wait Infinitely" 
+local lowCashWaitTimeLimit = 10
+local seedSkippedByPrice = false
+
 -- Shared State Tracker & Cache for Seeds
 local AutoRollIndex = 1 
 local goodSeedPresent = false 
 local activeGoodSeeds = {}
 
--- Pre-order seed data array keys to cleanly extract length
-local OrderedSeeds = {}
-if Seeds then
-    for seedName, seedData in pairs(Seeds) do
-        local idx = tonumber(seedData.index)
-        if idx then
-            OrderedSeeds[idx] = seedName
-        end
-    end
-end
-
 Player.CharacterAdded:Connect(function(char)
     character = char
     root = char:WaitForChild("HumanoidRootPart")
 end)
+
+-- Parses numbers with suffixes (e.g., "$325.24M", "10.5K") into accurate raw doubles
+local function parsePrice(text)
+    if not text or text == "" then return 0 end
+    local clean = string.gsub(tostring(text), "[%,%$%s]", "")
+    local numStr, suffix = string.match(clean, "^([%d%.]+)([KMBkmb]?)$")
+    local num = tonumber(numStr) or 0
+    
+    if suffix == "K" or suffix == "k" then
+        return num * 1000
+    elseif suffix == "M" or suffix == "m" then
+        return num * 1000000
+    elseif suffix == "B" or suffix == "b" then
+        return num * 1000000000
+    end
+    return num
+end
+
+-- Safely extracts value from leaderstats StringValue format
+local function getPlayerCash()
+    local leaderstats = Player:FindFirstChild("leaderstats")
+    local cashObj = leaderstats and leaderstats:FindFirstChild("Cash")
+    return cashObj and parsePrice(cashObj.Value) or 0
+end
 
 -- Helper function to find the first valid shootout target
 local function getShootTarget()
@@ -81,19 +103,27 @@ local function getShootTarget()
     end
 end
 
--- Helper to check if seed qualifies
+-- Helper to check if seed qualifies based on its registry array object matching
 local function isGoodSeed(seedName)
-    if not Seeds then return false end
-    local seedData = Seeds[seedName]
-    return seedData and seedData.index > AutoRollIndex
+    if not OrderedSeeds then return false end
+    
+    local seedIndex = nil
+    for idx, data in ipairs(OrderedSeeds) do
+        if data and data.Name == seedName then
+            seedIndex = idx
+            break
+        end
+    end
+    
+    return seedIndex and seedIndex > AutoRollIndex
 end
 
 -- Cache Management for Seeds
 local function onSeedAdded(instance)
     if isGoodSeed(instance.Name) then
         activeGoodSeeds[instance] = true
+        seedSkippedByPrice = false 
         
-        -- Misclick Protection: Instantly disable the prompt if user requested it
         if disableManualBuy then
             local buyPrompt = instance:FindFirstChild("BuySeed", true)
             if buyPrompt then buyPrompt.Enabled = false end
@@ -104,6 +134,7 @@ end
 CollectionService:GetInstanceAddedSignal("FloatSeed"):Connect(onSeedAdded)
 CollectionService:GetInstanceRemovedSignal("FloatSeed"):Connect(function(instance)
     activeGoodSeeds[instance] = nil
+    seedSkippedByPrice = false 
 end)
 
 -- Anti AFK Setup (VirtualUser prevents IDLE kick)
@@ -116,10 +147,8 @@ Player.Idled:Connect(function()
     end
 end)
 
--- Core Smart Equip Logic (Used by both button and auto-loop)
+-- Upgraded Best Seed Equipper Logic (Module-based calculation pass)
 local function equipBestSeed()
-    if not Seeds then return end
-    
     local currentCharacter = Player.Character or character
     local humanoid = currentCharacter:FindFirstChildOfClass("Humanoid")
     local backpack = Player:FindFirstChild("Backpack")
@@ -127,32 +156,33 @@ local function equipBestSeed()
     if not humanoid or not backpack then return end
     
     local bestTool = nil
-    local highestIndex = -1
-    local lowestCount = math.huge
+    local highestIncome = -1
+    local highestAmount = -1
 
     local function scanContainer(container)
         for _, tool in ipairs(container:GetChildren()) do
-            if tool:IsA("Tool") and string.find(tool.Name, "Seed") then
-                for index = 1, #OrderedSeeds do
-                    local seedName = OrderedSeeds[index]
-                    if seedName and string.find(tool.Name, "^" .. seedName) then
-                        -- Extract seed quantity count from syntax: (x5) -> 5. Fallback to 1 if not parsed.
-                        local countStr = string.match(tool.Name, "%(x(%d+)%)")
-                        local seedCount = countStr and tonumber(countStr) or 1
-                        
-                        -- Prioritization checklist logic
-                        if index > highestIndex then
-                            highestIndex = index
-                            lowestCount = seedCount
+            if tool:IsA("Tool") then
+                local plantName = tool:GetAttribute("Plant") or tool:GetAttribute("trueName")
+                if not plantName then continue end
+                
+                local plantLevel = tool:GetAttribute("Level") or 1
+                local plantMutation = tool:GetAttribute("Mutation") or "Normal"
+                
+                local amountStr = tool.Name:match("x(%d+)")
+                local amount = amountStr and tonumber(amountStr) or 1
+                
+                if plantName and plantMutation and plantLevel then
+                    local income = SharedUtils.CalculateIncome(plantName, plantMutation, plantLevel, 1)
+                    
+                    if income then
+                        if income > highestIncome then
+                            highestIncome = income
+                            highestAmount = amount
                             bestTool = tool
-                        elseif index == highestIndex then
-                            -- Same rarity tier, prioritize the item variant with the lower count
-                            if seedCount < lowestCount then
-                                lowestCount = seedCount
-                                bestTool = tool
-                            end
+                        elseif income == highestIncome and amount > highestAmount then
+                            highestAmount = amount
+                            bestTool = tool
                         end
-                        break
                     end
                 end
             end
@@ -261,8 +291,19 @@ end
 local function startAutoRoll()
     task.spawn(function()
         while autoRollEnabled and ScriptID == CurrentScriptID do
-            local hasSeeds = next(activeGoodSeeds) ~= nil
+            local hasSeeds = false
+            for targetSeed, _ in pairs(activeGoodSeeds) do
+                if targetSeed and targetSeed.Parent then
+                    hasSeeds = true
+                    break
+                end
+            end
             
+            -- If the purchase strategy chose to skip, treat it as empty so rolling keeps moving
+            if hasSeeds and seedSkippedByPrice then
+                hasSeeds = false
+            end
+
             if hasSeeds and not goodSeedPresent then
                 goodSeedPresent = true
             elseif not hasSeeds and goodSeedPresent then
@@ -278,12 +319,12 @@ local function startAutoRoll()
     end)
 end
 
--- LOOP 5: Auto Buy Loop
+-- LOOP 5: Auto Buy Loop (Bankruptcy Safeguard Engine Only)
 local function startAutoBuy()
     task.spawn(function()
         while autoBuyEnabled and ScriptID == CurrentScriptID do
             for targetSeed, _ in pairs(activeGoodSeeds) do
-                if targetSeed and targetSeed.Parent then
+                if targetSeed and targetSeed.Parent and not seedSkippedByPrice then
                     local buyPrompt = nil
                     
                     local union = targetSeed:FindFirstChild("Union")
@@ -299,10 +340,50 @@ local function startAutoBuy()
                     end
                     
                     if buyPrompt and buyPrompt:IsA("ProximityPrompt") then
-                        fireproximityprompt(buyPrompt)
+                        local gui = buyPrompt.Parent and buyPrompt.Parent:FindFirstChild("SeedGui")
+                        local textObj = gui and gui:FindFirstChild("Cost", true)
+                        
+                        -- Dynamic registration value lookup fallback engine if layout GUI fails
+                        local seedCost = 0
+                        if textObj then
+                            seedCost = parsePrice(textObj.Text)
+                        elseif Seeds and Seeds[targetSeed.Name] then
+                            seedCost = tonumber(Seeds[targetSeed.Name].Price) or 0
+                        end
+                        
+                        local walletCash = getPlayerCash()
+                        
+                        -- Execute checks dynamically based on current configuration rules
+                        if walletCash < seedCost then
+                            if lowCashStrategy == "Skip Seed" then
+                                seedSkippedByPrice = true
+                                activeGoodSeeds[targetSeed] = nil 
+                                break
+                            elseif lowCashStrategy == "Wait Infinitely" then
+                                -- Break loop item iteration, let the engine retry on next pass naturally without blocking
+                                break
+                            elseif lowCashStrategy == "Wait Custom Time" then
+                                local startTime = os.clock()
+                                while autoBuyEnabled and getPlayerCash() < seedCost and (os.clock() - startTime) < lowCashWaitTimeLimit do
+                                    task.wait(0.5)
+                                end
+                                if getPlayerCash() < seedCost then
+                                    seedSkippedByPrice = true
+                                    activeGoodSeeds[targetSeed] = nil 
+                                    break
+                                end
+                            end
+                        end
+                        
+                        -- Execution gatepass clearance
+                        if getPlayerCash() >= seedCost and not seedSkippedByPrice then
+                            fireproximityprompt(buyPrompt)
+                        end
                     end
                 else
-                    activeGoodSeeds[targetSeed] = nil 
+                    if not seedSkippedByPrice then
+                        activeGoodSeeds[targetSeed] = nil 
+                    end
                 end
             end
             task.wait(0.1)
@@ -310,7 +391,7 @@ local function startAutoBuy()
     end)
 end
 
--- LOOP 6: Auto Equip Best Seed Loop
+-- LOOP 6: Auto Buy Loop End Execution
 local function startAutoEquip()
     task.spawn(function()
         while autoEquipEnabled and ScriptID == CurrentScriptID do
@@ -395,24 +476,24 @@ local RarityLabel = MainTab:CreateLabel("Selected Min Tier: None")
 local function handleSliderUpdate(Value)
     AutoRollIndex = Value
     
-    local seedName = OrderedSeeds[Value]
-    local seedData = seedName and Seeds and Seeds[seedName]
-    
-    if seedData and seedName then
-        local rarity = seedData.rarity or "Unknown"
+    local seedData = OrderedSeeds and OrderedSeeds[Value]
+    if seedData then
+        local seedName = seedData.Name or "Unknown"
+        local rarity = seedData.Rarity or "Unknown"
         RarityLabel:Set("Selected Min Tier: " .. seedName .. " [" .. rarity .. "]")
     else
         RarityLabel:Set("Selected Min Tier: Index " .. tostring(Value))
     end
 
     table.clear(activeGoodSeeds)
+    seedSkippedByPrice = false
     for _, instance in ipairs(CollectionService:GetTagged("FloatSeed")) do
         onSeedAdded(instance)
     end
 end
 
 -- Auto Roll Index Slider Element using Range parameter configuration
-local maxRange = #OrderedSeeds > 0 and #OrderedSeeds or 1
+local maxRange = OrderedSeeds and #OrderedSeeds or 1
 MainTab:CreateSlider({
     Name = "Min Roll Rarity Index",
     Range = {1, maxRange},
@@ -420,6 +501,34 @@ MainTab:CreateSlider({
     CurrentValue = AutoRollIndex,
     Flag = "RollIndexSlider",
     Callback = handleSliderUpdate,
+})
+
+MainTab:CreateSection("--- Advanced Economic Controls ---")
+
+-- UI Elements for Safeguard 1 (Don't have enough money)
+MainTab:CreateDropdown({
+    Name = "If Wallet Balance Insufficient",
+    Options = {"Skip Seed", "Wait Infinitely", "Wait Custom Time"},
+    CurrentOption = lowCashStrategy,
+    Flag = "LowCashStrategyDropdown",
+    Callback = function(Value)
+        if type(Value) == "table" then
+            lowCashStrategy = Value[1]
+        else
+            lowCashStrategy = Value
+        end
+    end,
+})
+
+MainTab:CreateSlider({
+    Name = "Insufficient Cash Wait Limit (Sec)",
+    Range = {5, 120},
+    Increment = 5,
+    CurrentValue = lowCashWaitTimeLimit,
+    Flag = "LowCashWaitTimeLimitSlider",
+    Callback = function(Value)
+        lowCashWaitTimeLimit = Value
+    end,
 })
 
 MainTab:CreateSection("--- Protection & Safety ---")
@@ -448,7 +557,7 @@ MainTab:CreateToggle({
                 buyPrompt.Enabled = not Value
             end
         end
-    end,
+    end
 })
 
 MainTab:CreateToggle({
