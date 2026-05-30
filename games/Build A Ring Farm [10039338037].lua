@@ -41,9 +41,14 @@ local Seeds = {
     ["Dragonfruit"] = { index = 39, price = 350000, chance = "1%", source = "Seed Packs", rarity = "Exotic" },
 }
 
-getgenv().AutoSell = not getgenv().AutoSell
-getgenv().AutoHoneycomb = not getgenv().AutoHoneycomb
+-- Set the script ID globally once (no need to call getgenv again anywhere else)
+getgenv().ScriptID = os.clock()
+local CurrentScriptID = ScriptID
 
+-- Load Rayfield Library
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+-- Base Setup
 local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
 local Players = cloneref(game:GetService("Players"))
 local Player = Players.LocalPlayer
@@ -53,53 +58,92 @@ local root = character:FindFirstChild("HumanoidRootPart")
 local Honeycombs = workspace.InteractiveEvents.QueenBee.RuntimeHoneycombs
 local SellEvent = ReplicatedStorage.Remotes.SellCrates
 
--- Keep character references updated in the background
+-- Fast local variables for toggles
+local autoSellEnabled = false
+local autoHoneycombEnabled = false
+
 Player.CharacterAdded:Connect(function(char)
     character = char
     root = char:WaitForChild("HumanoidRootPart")
 end)
 
--- LOOP 1: Auto Sell
-task.spawn(function()
-    while getgenv().AutoSell do
-        SellEvent:FireServer()
-        task.wait(1)
-    end
-end)
+-- Create Rayfield Window
+local Window = Rayfield:CreateWindow({
+    Name = "Farm Hub",
+    LoadingTitle = "Loading Script...",
+    LoadingSubtitle = "by User",
+    ConfigurationSaving = { Enabled = false },
+    KeySystem = false
+})
 
--- LOOP 2: Auto Farm (Honeycombs & Plant Drops)
-task.spawn(function()
-    while getgenv().AutoHoneycomb do
-        if not root or not root.Parent then task.wait(0.5) continue end
+local Tab = Window:CreateTab("Main Farm", 4483362458)
 
-        local targetPrompt = nil
+-- LOOP 1: Auto Sell Loop
+local function startAutoSell()
+    task.spawn(function()
+        -- Direct variable comparisons without getgenv calls
+        while autoSellEnabled and ScriptID == CurrentScriptID do
+            SellEvent:FireServer()
+            task.wait(1)
+        end
+    end)
+end
 
-        -- Priority 1: Look for Plant Drop
-        for _, child in pairs(workspace:GetChildren()) do
-            if string.find(child.Name, "PlantRushLocalDrop") then
-                targetPrompt = child:FindFirstChild("ProximityPrompt")
-                if targetPrompt then break end
+-- LOOP 2: Auto Farm Loop
+local function startAutoFarm()
+    task.spawn(function()
+        -- Direct variable comparisons without getgenv calls
+        while autoHoneycombEnabled and ScriptID == CurrentScriptID do
+            if not root or not root.Parent then task.wait(0.5) continue end
+
+            local targetPrompt = nil
+
+            -- Priority 1: Look for Plant Drop
+            for _, child in pairs(workspace:GetChildren()) do
+                if string.find(child.Name, "PlantRushLocalDrop") then
+                    targetPrompt = child:FindFirstChild("ProximityPrompt")
+                    if targetPrompt then break end
+                end
+            end
+
+            -- Priority 2: Look for Honeycomb
+            if not targetPrompt then
+                for _, hc in pairs(Honeycombs:GetChildren()) do
+                    local innerPart = hc:FindFirstChild("Honeycomb")
+                    targetPrompt = innerPart and innerPart:FindFirstChild("ProximityPrompt")
+                    if targetPrompt then break end
+                end
+            end
+
+            if targetPrompt and targetPrompt.Parent then
+                root.CFrame = CFrame.new(targetPrompt.Parent.Position) * root.CFrame.Rotation
+                task.wait(0.2)
+                fireproximityprompt(targetPrompt)
+                task.wait(0.1)
+            else
+                task.wait(0.1)
             end
         end
+    end)
+end
 
-        -- Priority 2: Look for Honeycomb if no Plant Drop was found
-        if not targetPrompt then
-            for _, hc in pairs(Honeycombs:GetChildren()) do
-                local innerPart = hc:FindFirstChild("Honeycomb")
-                targetPrompt = innerPart and innerPart:FindFirstChild("ProximityPrompt")
-                if targetPrompt then break end
-            end
-        end
+-- UI Toggles
+Tab:CreateToggle({
+    Name = "Auto Sell",
+    CurrentValue = true,
+    Flag = "AutoSellToggle",
+    Callback = function(Value)
+        autoSellEnabled = Value
+        if Value then startAutoSell() end
+    end,
+})
 
-        -- If a prompt was found, claim it
-        if targetPrompt and targetPrompt.Parent then
-            root.CFrame = CFrame.new(targetPrompt.Parent.Position) * root.CFrame.Rotation
-            task.wait(0.2)
-            fireproximityprompt(targetPrompt)
-            task.wait(0.1)
-        else
-            -- Small wait if no items are currently on the map
-            task.wait(0.1)
-        end
-    end
-end)
+Tab:CreateToggle({
+    Name = "Auto Farm Honey/Plants",
+    CurrentValue = true,
+    Flag = "AutoFarmToggle",
+    Callback = function(Value)
+        autoHoneycombEnabled = Value
+        if Value then startAutoFarm() end
+    end,
+})
