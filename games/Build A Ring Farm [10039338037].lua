@@ -43,48 +43,63 @@ local Seeds = {
 
 getgenv().AutoSell = not getgenv().AutoSell
 getgenv().AutoHoneycomb = not getgenv().AutoHoneycomb
-local Player = cloneref(game:GetService("Players")).Player
+
+local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
+local Players = cloneref(game:GetService("Players"))
+local Player = Players.LocalPlayer
 local character = Player.Character or Player.CharacterAdded:Wait()
 local root = character:FindFirstChild("HumanoidRootPart")
-local Honeycombs = workspace.InteractiveEvents.QueenBee.RuntimeHoneycombs
-local Event = game:GetService("ReplicatedStorage").Remotes.SellCrates
 
+local Honeycombs = workspace.InteractiveEvents.QueenBee.RuntimeHoneycombs
+local SellEvent = ReplicatedStorage.Remotes.SellCrates
+
+-- Keep character references updated in the background
 Player.CharacterAdded:Connect(function(char)
     character = char
     root = char:WaitForChild("HumanoidRootPart")
 end)
 
-while getgenv().AutoSell do
-	Event:FireServer()
-	task.wait(1)
-end
-
--- Main farm loop
-while getgenv().AutoHoneycomb do
-    if #Honeycombs:GetChildren() == 0 then
-        Honeycombs.ChildAdded:Wait()
-        task.wait(0.1)
+-- LOOP 1: Auto Sell
+task.spawn(function()
+    while getgenv().AutoSell do
+        SellEvent:FireServer()
+        task.wait(1)
     end
+end)
 
-    if not root then 
-        task.wait(0.5)
-        continue 
-    end
+-- LOOP 2: Auto Farm (Honeycombs & Plant Drops)
+task.spawn(function()
+    while getgenv().AutoHoneycomb do
+        if not root or not root.Parent then task.wait(0.5) continue end
 
-    -- Fast-scan descendants for actionable prompts
-    for _, v in pairs(Honeycombs:GetDescendants()) do
-        if not getgenv().AutoHoneycomb then break end
-        if not root then break end -- Extra safety break mid-scan
-        if not v:IsA("ProximityPrompt") then continue end
-        
-        local parent = v.Parent
-        if parent and parent:IsA("BasePart") then
-            root.CFrame = CFrame.new(parent.Position) * root.CFrame.Rotation
+        local targetPrompt = nil
+
+        -- Priority 1: Look for Plant Drop
+        for _, child in pairs(workspace:GetChildren()) do
+            if string.find(child.Name, "PlantRushLocalDrop") then
+                targetPrompt = child:FindFirstChild("ProximityPrompt")
+                if targetPrompt then break end
+            end
+        end
+
+        -- Priority 2: Look for Honeycomb if no Plant Drop was found
+        if not targetPrompt then
+            for _, hc in pairs(Honeycombs:GetChildren()) do
+                local innerPart = hc:FindFirstChild("Honeycomb")
+                targetPrompt = innerPart and innerPart:FindFirstChild("ProximityPrompt")
+                if targetPrompt then break end
+            end
+        end
+
+        -- If a prompt was found, claim it
+        if targetPrompt and targetPrompt.Parent then
+            root.CFrame = CFrame.new(targetPrompt.Parent.Position) * root.CFrame.Rotation
             task.wait(0.2)
-            fireproximityprompt(v)
+            fireproximityprompt(targetPrompt)
+            task.wait(0.1)
+        else
+            -- Small wait if no items are currently on the map
             task.wait(0.1)
         end
     end
-    
-    task.wait()
-end
+end)
