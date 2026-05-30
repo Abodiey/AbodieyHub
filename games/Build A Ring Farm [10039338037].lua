@@ -1,30 +1,41 @@
---seeds, worst to best
-local Seeds = loadstring(game:HttpGet("https://raw.githubusercontent.com/Abodiey/AbodieyHub/refs/heads/main/helpers/Build%20A%20Ring%20Farm%20%5B10039338037%5D.lua"))()
-
 -- Set the script ID globally once (no need to call getgenv again anywhere else)
 getgenv().ScriptID = os.clock()
 local CurrentScriptID = ScriptID
+
+-- 1. Load the Seeds Data Table for Auto Roll/Buy
+local Seeds = loadstring(game:HttpGet("https://raw.githubusercontent.com/Abodiey/AbodieyHub/refs/heads/main/helpers/Build%20A%20Ring%20Farm%20%5B10039338037%5D.lua"))()
 
 -- Load Rayfield Library
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
 -- Base Setup
 local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
+local CollectionService = cloneref(game:GetService("CollectionService"))
+local TeleportService = cloneref(game:GetService("TeleportService"))
 local Players = cloneref(game:GetService("Players"))
 local Player = Players.LocalPlayer
 local character = Player.Character or Player.CharacterAdded:Wait()
 local root = character:FindFirstChild("HumanoidRootPart")
 
--- Folder & Remote References
+-- Folder, Remote & Map References
 local Honeycombs = workspace.InteractiveEvents.QueenBee.RuntimeHoneycombs
 local SellEvent = ReplicatedStorage.Remotes.SellCrates
 local ShootRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PlantRush"):WaitForChild("Shoot")
 local RuntimeFolder = workspace:WaitForChild("InteractiveEvents").PlantRush.Runtime
+local rollPrompt = workspace.Map.Plots:FindFirstChild("RollSeeds", true)
 
 -- Fast local variables for toggles
 local autoSellEnabled = true
 local autoHoneycombEnabled = true
 local autoShootEnabled = true
+local autoRollEnabled = false
+local autoBuyEnabled = false
+local antiAfkEnabled = true
+
+-- Shared State Tracker & Cache for Seeds
+local AutoRollIndex = 1 
+local goodSeedPresent = false 
+local activeGoodSeeds = {}
 
 Player.CharacterAdded:Connect(function(char)
     character = char
@@ -41,6 +52,40 @@ local function getShootTarget()
     end
 end
 
+-- Helper to check if seed qualifies
+local function isGoodSeed(seedName)
+    if not Seeds then return false end
+    local seedData = Seeds[seedName]
+    return seedData and seedData.index > AutoRollIndex
+end
+
+-- Cache Management for Seeds
+local function onSeedAdded(instance)
+    if isGoodSeed(instance.Name) then
+        activeGoodSeeds[instance] = true
+    end
+end
+
+CollectionService:GetInstanceAddedSignal("FloatSeed"):Connect(onSeedAdded)
+CollectionService:GetInstanceRemovedSignal("FloatSeed"):Connect(function(instance)
+    activeGoodSeeds[instance] = nil
+end)
+
+-- Initial seed scan
+for _, instance in ipairs(CollectionService:GetTagged("FloatSeed")) do
+    onSeedAdded(instance)
+end
+
+-- Anti AFK Setup (VirtualUser prevents IDLE kick)
+local VirtualUser = cloneref(game:GetService("VirtualUser"))
+Player.Idled:Connect(function()
+    if antiAfkEnabled and ScriptID == CurrentScriptID then
+        VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+        task.wait(1)
+        VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+    end
+end)
+
 -- Create Rayfield Window
 local Window = Rayfield:CreateWindow({
     Name = "Farm Hub",
@@ -51,6 +96,11 @@ local Window = Rayfield:CreateWindow({
 })
 
 local Tab = Window:CreateTab("Main Farm", 4483362458)
+local UtilTab = Window:CreateTab("Utilities", 4483362734)
+
+-- ==========================================
+-- RUNTIME LOOPS
+-- ==========================================
 
 -- LOOP 1: Auto Sell Loop
 local function startAutoSell()
@@ -108,12 +158,57 @@ local function startAutoShoot()
                 local pos = targetPart.Position
                 ShootRemote:FireServer(pos, Vector3.new(0, 1, 0), pos)
             end
-            task.wait() -- Fast execution loop
+            task.wait() 
         end
     end)
 end
 
--- UI Toggles
+-- LOOP 4: Auto Roll Loop
+local function startAutoRoll()
+    task.spawn(function()
+        while autoRollEnabled and ScriptID == CurrentScriptID do
+            local hasSeeds = next(activeGoodSeeds) ~= nil
+            
+            if hasSeeds and not goodSeedPresent then
+                goodSeedPresent = true
+            elseif not hasSeeds and goodSeedPresent then
+                goodSeedPresent = false
+            end
+            
+            if not goodSeedPresent and rollPrompt then
+                fireproximityprompt(rollPrompt)
+            end
+            
+            task.wait(0.3)
+        end
+    end)
+end
+
+-- LOOP 5: Auto Buy Loop
+local function startAutoBuy()
+    task.spawn(function()
+        while autoBuyEnabled and ScriptID == CurrentScriptID do
+            for targetSeed, _ in pairs(activeGoodSeeds) do
+                if targetSeed and targetSeed.Parent then
+                    local union = targetSeed:FindFirstChild("Union")
+                    local buyPrompt = union and union:FindFirstChild("BuySeed")
+                    
+                    if buyPrompt and buyPrompt:IsA("ProximityPrompt") then
+                        fireproximityprompt(buyPrompt)
+                    end
+                else
+                    activeGoodSeeds[targetSeed] = nil 
+                end
+            end
+            task.wait(0.1)
+        end
+    end)
+end
+
+-- ==========================================
+-- UI ELEMENTS
+-- ==========================================
+
 Tab:CreateToggle({
     Name = "Auto Sell",
     CurrentValue = autoSellEnabled,
@@ -143,3 +238,48 @@ Tab:CreateToggle({
         if Value then startAutoShoot() end
     end,
 })
+
+Tab:CreateToggle({
+    Name = "Auto Roll Seeds",
+    CurrentValue = autoRollEnabled,
+    Flag = "AutoRollToggle",
+    Callback = function(Value)
+        autoRollEnabled = Value
+        if Value then startAutoRoll() end
+    end,
+})
+
+Tab:CreateToggle({
+    Name = "Auto Buy Seeds",
+    CurrentValue = autoBuyEnabled,
+    Flag = "AutoBuyToggle",
+    Callback = function(Value)
+        autoBuyEnabled = Value
+        if Value then startAutoBuy() end
+    end,
+})
+
+UtilTab:CreateToggle({
+    Name = "Anti AFK",
+    CurrentValue = antiAfkEnabled,
+    Flag = "AntiAfkToggle",
+    Callback = function(Value)
+        antiAfkEnabled = Value
+    end,
+})
+
+UtilTab:CreateButton({
+    Name = "Rejoin Server",
+    Callback = function()
+        if #Players:GetPlayers() <= 1 then
+            TeleportService:Teleport(game.PlaceId, Player)
+        else
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, Player)
+        end
+    end,
+})
+
+-- Fire default executing threads automatically at load time
+startAutoSell()
+startAutoFarm()
+startAutoShoot()
