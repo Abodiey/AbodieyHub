@@ -25,7 +25,10 @@ Seeds.GetPlantsForIndex = nil -- Clean up the function reference from the module
 local Honeycombs = workspace.InteractiveEvents.QueenBee.RuntimeHoneycombs
 local SellEvent = ReplicatedStorage.Remotes.SellCrates
 local RemovePlantEvent = ReplicatedStorage.Remotes.RemovePlant
+local PlantSeedEvent = ReplicatedStorage.Remotes.PlantSeed
 local ShootRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PlantRush"):WaitForChild("Shoot")
+local SetSettingRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Settings"):WaitForChild("SetSetting")
+local SubmitCodeRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("SubmitCode")
 local RuntimeFolder = workspace:WaitForChild("InteractiveEvents").PlantRush.Runtime
 local rollPrompt = workspace.Map.Plots:FindFirstChild("RollSeeds", true)
 
@@ -50,14 +53,28 @@ local autoShootEnabled = true
 local autoRollEnabled = false
 local autoBuyEnabled = false
 local autoEquipEnabled = false
+local autoPlantEnabled = false
 local disableManualRoll = false
 local disableManualBuy = false
 local antiAfkEnabled = true
+local lowPerformanceEnabled = true
 
 -- Advanced Economic & Strategy Variables
-local lowCashStrategy = "Wait Infinitely" 
+local lowCashStrategy = "Skip Seed" -- Adjusted default fallback state
 local lowCashWaitTimeLimit = 10
 local seedSkippedByPrice = false
+local targetCodeText = ""
+
+-- Code Pool Table Configuration
+local promoCodesList = {
+    "PLANTRUSH",
+    "UPDATE2",
+    "THANKYOU",
+    "BARF:3",
+    "100KVISITS",
+    "2KLIKES",
+    "UPDATE1"
+}
 
 -- Shared State Tracker & Cache for Seeds
 local AutoRollIndex = 1 
@@ -146,6 +163,32 @@ Player.Idled:Connect(function()
         VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
     end
 end)
+
+-- Core Sorted Layout Collector for FarmPlots
+local function getSortedFarmPlots()
+    if not plot then return {} end
+    local farmPlot = plot:FindFirstChild("FarmPlot")
+    if not farmPlot then return {} end
+
+    local validPlots = {}
+    for _, child in ipairs(farmPlot:GetChildren()) do
+        local ringVal = child:GetAttribute("PlotRing")
+        if ringVal then
+            table.insert(validPlots, {instance = child, ring = tonumber(ringVal) or 999})
+        end
+    end
+
+    table.sort(validPlots, function(a, b)
+        return a.ring < b.ring
+    end)
+
+    -- Return unpacked sequential instances
+    local sortedInstances = {}
+    for i, data in ipairs(validPlots) do
+        sortedInstances[i] = data.instance
+    end
+    return sortedInstances
+end
 
 -- Upgraded Best Seed Equipper Logic (Module-based calculation pass)
 local function equipBestSeed()
@@ -391,12 +434,30 @@ local function startAutoBuy()
     end)
 end
 
--- LOOP 6: Auto Buy Loop End Execution
+-- LOOP 6: Auto Equip Loop End Execution
 local function startAutoEquip()
     task.spawn(function()
         while autoEquipEnabled and ScriptID == CurrentScriptID do
             equipBestSeed()
             task.wait(1)
+        end
+    end)
+end
+
+-- LOOP 7: Auto Plant Seeds Background Handler Loop
+local function startAutoPlant()
+    task.spawn(function()
+        while autoPlantEnabled and ScriptID == CurrentScriptID do
+            local sortedPlots = getSortedFarmPlots()
+            for _, v in ipairs(sortedPlots) do
+                if not autoPlantEnabled or ScriptID ~= CurrentScriptID then break end
+                if not v:FindFirstChild("Dirt") then continue end
+                if v.Dirt:GetAttribute("Plant") then continue end
+                
+                PlantSeedEvent:FireServer(v.Dirt)
+                task.wait(0.15)
+            end
+            task.wait(0.5)
         end
     end)
 end
@@ -469,6 +530,16 @@ MainTab:CreateToggle({
     end,
 })
 
+MainTab:CreateToggle({
+    Name = "Auto Plant Seeds",
+    CurrentValue = autoPlantEnabled,
+    Flag = "AutoPlantToggle",
+    Callback = function(Value)
+        autoPlantEnabled = Value
+        if Value then startAutoPlant() end
+    end,
+})
+
 -- Dynamic Label tracking your selections safely
 local RarityLabel = MainTab:CreateLabel("Selected Min Tier: None")
 
@@ -528,6 +599,60 @@ MainTab:CreateSlider({
     Flag = "LowCashWaitTimeLimitSlider",
     Callback = function(Value)
         lowCashWaitTimeLimit = Value
+    end,
+})
+
+MainTab:CreateSection("--- Performance & Codes ---")
+
+MainTab:CreateToggle({
+    Name = "Low Performance Mode",
+    CurrentValue = lowPerformanceEnabled,
+    Flag = "LowPerformanceToggle",
+    Callback = function(Value)
+        lowPerformanceEnabled = Value
+        SetSettingRemote:FireServer("LowPerformanceMode", Value)
+    end,
+})
+
+MainTab:CreateInput({
+    Name = "Enter Promo Code",
+    PlaceholderText = "Type code here...",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        targetCodeText = Text
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Submit Entered Code",
+    Callback = function()
+        if targetCodeText and targetCodeText ~= "" then
+            local success, result = pcall(function()
+                return SubmitCodeRemote:InvokeServer(targetCodeText)
+            end)
+            if success then
+                Rayfield:Notify({Title = "Code System", Content = "Submitted code: " .. tostring(targetCodeText), Duration = 3})
+            else
+                Rayfield:Notify({Title = "Error", Content = "Submission invocation failed!", Duration = 3})
+            end
+        else
+            Rayfield:Notify({Title = "Warning", Content = "Code field is currently empty!", Duration = 3})
+        end
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Redeem All Promo Codes",
+    Callback = function()
+        task.spawn(function()
+            for _, code in ipairs(promoCodesList) do
+                pcall(function()
+                    SubmitCodeRemote:InvokeServer(code)
+                end)
+                task.wait(0.3) -- Yield slightly between invokes to avoid rate limits
+            end
+            Rayfield:Notify({Title = "Success", Content = "All known code streams processed!", Duration = 3})
+        end)
     end,
 })
 
@@ -599,14 +724,9 @@ MainTab:CreateButton({
 MainTab:CreateButton({
     Name = "Clear All Plants",
     Callback = function()
-        if not plot then
-            Rayfield:Notify({Title = "Error", Content = "Plot not found, cannot clear plants!", Duration = 3})
-            return
-        end
-
-        local farmPlot = plot:FindFirstChild("FarmPlot")
-        if not farmPlot then
-            Rayfield:Notify({Title = "Error", Content = "FarmPlot folder missing from your plot!", Duration = 3})
+        local sortedPlots = getSortedFarmPlots()
+        if #sortedPlots == 0 then
+            Rayfield:Notify({Title = "Error", Content = "No valid farmable plots detected!", Duration = 3})
             return
         end
 
@@ -614,9 +734,9 @@ MainTab:CreateButton({
             local x = -1
             while x ~= 0 do
                 x = 0
-                for _, v in pairs(farmPlot:GetChildren()) do
+                for _, v in ipairs(sortedPlots) do
                     if not v:FindFirstChild("Dirt") then continue end
-                    if not v.Dirt:FindFirstChildOfClass("Model") then continue end
+                    if not v.Dirt:GetAttribute("Plant") then continue end
                     
                     x = x + 1
                     RemovePlantEvent:FireServer(v.Dirt)
@@ -642,6 +762,11 @@ MainTab:CreateButton({
 
 -- Run initial configuration rules explicitly at setup time
 handleSliderUpdate(AutoRollIndex)
+
+-- Execute Low Performance Optimization initial sequence immediately on run
+pcall(function()
+    SetSettingRemote:FireServer("LowPerformanceMode", true)
+end)
 
 -- Fire default executing threads automatically at load time
 startAutoSell()
