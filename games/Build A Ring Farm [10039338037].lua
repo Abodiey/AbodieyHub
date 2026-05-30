@@ -457,7 +457,7 @@ end
 -- LOOP 7: Auto Plant Seeds Background Handler Loop
 local function startAutoPlant()
     task.spawn(function()
-        while autoPlantEnabled park and ScriptID == CurrentScriptID do
+        while autoPlantEnabled and ScriptID == CurrentScriptID do
             local sortedPlots = getSortedFarmPlots()
             for _, v in ipairs(sortedPlots) do
                 if not autoPlantEnabled or ScriptID ~= CurrentScriptID then break end
