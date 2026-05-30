@@ -115,20 +115,34 @@ Player.CharacterAdded:Connect(function(char)
     root = char:WaitForChild("HumanoidRootPart")
 end)
 
--- Parses numbers with suffixes (e.g., "$325.24M", "10.5K") into accurate raw doubles
+-- Comprehensive number parser supporting massive multi-tier economy suffixes
 local function parsePrice(text)
     if not text or text == "" then return 0 end
-    local clean = string.gsub(tostring(text), "[%,%$%s]", "")
-    local numStr, suffix = string.match(clean, "^([%d%.]+)([KMBkmb]?)$")
-    local num = tonumber(numStr) or 0
     
-    if suffix == "K" or suffix == "k" then
-        return num * 1000
-    elseif suffix == "M" or suffix == "m" then
-        return num * 1000000
-    elseif suffix == "B" or suffix == "b" then
-        return num * 1000000000
+    -- Clean the string entirely of commas, dollar signs, and white spaces
+    local clean = string.gsub(tostring(text), "[%,%$%s]", "")
+    
+    -- Extract the numeric value segment and its trailing alphabetical suffix characters
+    local numStr, suffix = string.match(clean, "^([%d%.]+)([A-Za-z]*)$")
+    local num = tonumber(numStr) or 0
+    if suffix then
+        suffix = string.lower(suffix)
     end
+    
+    if suffix == "k" then
+        return num * 10^3
+    elseif suffix == "m" then
+        return num * 10^6
+    elseif suffix == "b" then
+        return num * 10^9
+    elseif suffix == "t" then
+        return num * 10^12
+    elseif suffix == "q" then
+        return num * 10^15
+    elseif suffix == "qi" then
+        return num * 10^18
+    end
+    
     return num
 end
 
