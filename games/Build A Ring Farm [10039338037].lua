@@ -80,7 +80,6 @@ local antiEventPopupEnabled = true
 -- Dynamic Calculation Settings
 local ignoreMutation = false
 local ignoreLevel = false
-local ignoreAmount = false
 
 -- Advanced Economic & Strategy Variables
 local lowCashStrategy = "Skip Seed"
@@ -229,7 +228,7 @@ local function getSortedFarmPlots()
     return sortedInstances
 end
 
--- Upgraded Best Seed Equipper Logic (Module-based calculation pass)
+-- Upgraded Best Seed Equipper Logic (Pure Base Value Comparison Pass)
 local function equipBestSeed()
     local currentCharacter = Player.Character or character
     local humanoid = currentCharacter:FindFirstChildOfClass("Humanoid")
@@ -239,7 +238,6 @@ local function equipBestSeed()
     
     local bestTool = nil
     local highestIncome = -1
-    local highestAmount = -1
 
     local function scanContainer(container)
         for _, tool in ipairs(container:GetChildren()) do
@@ -251,26 +249,12 @@ local function equipBestSeed()
                 local plantLevel = ignoreLevel and 1 or (tool:GetAttribute("Level") or 1)
                 local plantMutation = ignoreMutation and "Normal" or (tool:GetAttribute("Mutation") or "Normal")
                 
-                local amount = 1
-                if not ignoreAmount then
-                    local amountStr = tool.Name:match("x(%d+)")
-                    amount = amountStr and tonumber(amountStr) or 1
-                end
-                
                 if plantName and plantMutation and plantLevel then
                     local income = SharedUtils.CalculateIncome(plantName, plantMutation, plantLevel, 1)
                     
-                    if income then
-                        -- Check against total value configuration weighting matrix
-                        local calculatedVal = income * amount
-                        if calculatedVal > highestIncome then
-                            highestIncome = calculatedVal
-                            highestAmount = amount
-                            bestTool = tool
-                        elseif calculatedVal == highestIncome and amount > highestAmount then
-                            highestAmount = amount
-                            bestTool = tool
-                        end
+                    if income and income > highestIncome then
+                        highestIncome = income
+                        bestTool = tool
                     end
                 end
             end
@@ -280,6 +264,7 @@ local function equipBestSeed()
     scanContainer(backpack)
     scanContainer(currentCharacter)
 
+    -- Only execute equip if a superior tool is identified outside the character
     if bestTool and bestTool.Parent ~= currentCharacter then
         humanoid:EquipTool(bestTool)
     end
@@ -673,15 +658,6 @@ MainTab:CreateToggle({
 })
 
 MainTab:CreateToggle({
-    Name = "Ignore Amount Stack (Best Seed)",
-    CurrentValue = ignoreAmount,
-    Flag = "IgnoreAmountToggle",
-    Callback = function(Value)
-        ignoreAmount = Value
-    end,
-})
-
-MainTab:CreateToggle({
     Name = "Auto Plant Seeds",
     CurrentValue = autoPlantEnabled,
     Flag = "AutoPlantToggle",
@@ -757,7 +733,6 @@ MainTab:CreateDropdown({
             lowCashStrategy = Value[1]
         else
             lowCashStrategy = Value
-        -- Fixed closing parenthesis error on next line
         end
     end,
 })
@@ -861,7 +836,6 @@ MainTab:CreateToggle({
             if buyPrompt then
                 buyPrompt.Enabled = not Value
             end
-        -- Fixed missing closing parenthesis layout
         end
     end
 })
