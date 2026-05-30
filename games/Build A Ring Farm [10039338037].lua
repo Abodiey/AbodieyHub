@@ -1,5 +1,5 @@
 --seeds, worst to best
-local seeds = Seeds = {
+local Seeds = {
     ["Carrot"] = { index = 1, price = 3, chance = "33.333333%", source = "Rolling", rarity = "Common" },
     ["Beetroot"] = { index = 2, price = 5, chance = "33.333333%", source = "Rolling", rarity = "Common" },
     ["Pumpkin"] = { index = 3, price = 8, chance = "25%", source = "Rolling", rarity = "Common" },
