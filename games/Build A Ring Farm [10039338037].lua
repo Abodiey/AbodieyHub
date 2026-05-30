@@ -116,6 +116,57 @@ Player.Idled:Connect(function()
     end
 end)
 
+-- Core Smart Equip Logic (Used by both button and auto-loop)
+local function equipBestSeed()
+    if not Seeds then return end
+    
+    local currentCharacter = Player.Character or character
+    local humanoid = currentCharacter:FindFirstChildOfClass("Humanoid")
+    local backpack = Player:FindFirstChild("Backpack")
+    
+    if not humanoid or not backpack then return end
+    
+    local bestTool = nil
+    local highestIndex = -1
+    local lowestCount = math.huge
+
+    local function scanContainer(container)
+        for _, tool in ipairs(container:GetChildren()) do
+            if tool:IsA("Tool") and string.find(tool.Name, "Seed") then
+                for index = 1, #OrderedSeeds do
+                    local seedName = OrderedSeeds[index]
+                    if seedName and string.find(tool.Name, "^" .. seedName) then
+                        -- Extract seed quantity count from syntax: (x5) -> 5. Fallback to 1 if not parsed.
+                        local countStr = string.match(tool.Name, "%(x(%d+)%)")
+                        local seedCount = countStr and tonumber(countStr) or 1
+                        
+                        -- Prioritization checklist logic
+                        if index > highestIndex then
+                            highestIndex = index
+                            lowestCount = seedCount
+                            bestTool = tool
+                        elseif index == highestIndex then
+                            -- Same rarity tier, prioritize the item variant with the lower count
+                            if seedCount < lowestCount then
+                                lowestCount = seedCount
+                                bestTool = tool
+                            end
+                        end
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    scanContainer(backpack)
+    scanContainer(currentCharacter)
+
+    if bestTool and bestTool.Parent ~= currentCharacter then
+        humanoid:EquipTool(bestTool)
+    end
+end
+
 -- Create Rayfield Window
 local Window = Rayfield:CreateWindow({
     Name = "Farm Hub",
@@ -263,38 +314,7 @@ end
 local function startAutoEquip()
     task.spawn(function()
         while autoEquipEnabled and ScriptID == CurrentScriptID do
-            if Seeds then
-                local currentCharacter = Player.Character or character
-                local humanoid = currentCharacter:FindFirstChildOfClass("Humanoid")
-                local backpack = Player:FindFirstChild("Backpack")
-                
-                if humanoid and backpack then
-                    local bestTool = nil
-                    local highestIndex = -1
-
-                    local function scanContainer(container)
-                        for _, tool in ipairs(container:GetChildren()) do
-                            if tool:IsA("Tool") then
-                                for index = 1, #OrderedSeeds do
-                                    local seedName = OrderedSeeds[index]
-                                    if seedName and string.find(tool.Name, "^" .. seedName) and index > highestIndex then
-                                        highestIndex = index
-                                        bestTool = tool
-                                        break
-                                    end
-                                end
-                            end
-                        end
-                    end
-
-                    scanContainer(backpack)
-                    scanContainer(currentCharacter)
-
-                    if bestTool and bestTool.Parent ~= currentCharacter then
-                        humanoid:EquipTool(bestTool)
-                    end
-                end
-            end
+            equipBestSeed()
             task.wait(1)
         end
     end)
@@ -441,6 +461,11 @@ MainTab:CreateToggle({
 })
 
 MainTab:CreateSection("--- Utilities ---")
+
+MainTab:CreateButton({
+    Name = "Equip Best Seed",
+    Callback = equipBestSeed,
+})
 
 MainTab:CreateButton({
     Name = "Teleport to Plot",
