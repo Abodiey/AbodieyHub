@@ -1,5 +1,5 @@
 --seeds, worst to best
-local Seeds = {} --placeholder
+local Seeds = loadstring(game:HttpGet("https://raw.githubusercontent.com/Abodiey/AbodieyHub/refs/heads/main/helpers/Build%20A%20Ring%20Farm%20%5B10039338037%5D.lua"))()
 
 -- Set the script ID globally once (no need to call getgenv again anywhere else)
 getgenv().ScriptID = os.clock()
