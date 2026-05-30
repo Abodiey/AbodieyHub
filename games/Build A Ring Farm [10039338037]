@@ -1,0 +1,6 @@
+getgenv().AutoSell = not getgenv().AutoSell
+local Event = game:GetService("ReplicatedStorage").Remotes.SellCrates
+while getgenv().AutoSell do
+	Event:FireServer()
+	task.wait(1)
+end
