@@ -41,6 +41,7 @@ local Honeycombs = workspace.InteractiveEvents.QueenBee.RuntimeHoneycombs
 local SellEvent = ReplicatedStorage.Remotes.SellCrates
 local RemovePlantEvent = ReplicatedStorage.Remotes.RemovePlant
 local PlantSeedEvent = ReplicatedStorage.Remotes.PlantSeed
+local UpgradePlantEvent = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("UpgradePlant")
 local ShootRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PlantRush"):WaitForChild("Shoot")
 local SetSettingRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Settings"):WaitForChild("SetSetting")
 local SubmitCodeRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("SubmitCode")
@@ -69,6 +70,7 @@ local autoRollEnabled = false
 local autoBuyEnabled = false
 local autoEquipEnabled = false
 local autoPlantEnabled = false
+local autoUpgradeEnabled = false
 local autoClearEnabled = false
 local waitForServerConfirmation = true
 local disableManualRoll = false
@@ -80,6 +82,10 @@ local antiEventPopupEnabled = true
 -- Dynamic Calculation Settings
 local ignoreMutation = false
 local ignoreLevel = false
+
+-- Target Floor and Priority Routing Variables
+local activeFloorTarget = "All Floors"
+local floorPriorityStrategy = "Lowest Floor First"
 
 -- Advanced Economic & Strategy Variables
 local lowCashStrategy = "Skip Seed"
@@ -201,26 +207,55 @@ Player.Idled:Connect(function()
     end
 end)
 
--- Core Sorted Layout Collector for FarmPlots
+-- Multi-Floor FarmPlot Collector & Routing Core
 local function getSortedFarmPlots()
     if not plot then return {} end
-    local farmPlot = plot:FindFirstChild("FarmPlot")
-    if not farmPlot then return {} end
-
+    
     local validPlots = {}
-    for _, child in ipairs(farmPlot:GetChildren()) do
-        local dirt = child:FindFirstChild("Dirt")
-        local ringVal = dirt and dirt:GetAttribute("PlotRing")
-        if ringVal then
-            table.insert(validPlots, {instance = child, ring = tonumber(ringVal) or 999})
+    
+    local function harvestPlotsFromFolder(folder, floorMultiplier)
+        if not folder then return end
+        for _, child in ipairs(folder:GetChildren()) do
+            local dirt = child:FindFirstChild("Dirt")
+            local ringVal = dirt and dirt:GetAttribute("PlotRing")
+            if ringVal then
+                local baseRing = tonumber(ringVal) or 999
+                local calculatedPriority = baseRing + floorMultiplier
+                table.insert(validPlots, {instance = child, ring = calculatedPriority, baseRing = baseRing})
+            end
         end
     end
 
+    -- Filter and Route floor passes intelligently based on targeted UI dropdown options
+    if activeFloorTarget == "All Floors" or activeFloorTarget == "Floor 1 Only" then
+        harvestPlotsFromFolder(plot:FindFirstChild("FarmPlot"), 0)
+    end
+    
+    if activeFloorTarget == "All Floors" or activeFloorTarget == "Floor 2 Only" then
+        local secondFloor = plot:FindFirstChild("SecondFloor")
+        if secondFloor then
+            harvestPlotsFromFolder(secondFloor:FindFirstChild("FarmPlot"), 1000)
+        end
+    end
+    
+    if activeFloorTarget == "All Floors" or activeFloorTarget == "Floor 3 Only" then
+        local thirdFloor = plot:FindFirstChild("ThirdFloor")
+        if thirdFloor then
+            harvestPlotsFromFolder(thirdFloor:FindFirstChild("FarmPlot"), 2000)
+        end
+    end
+
+    -- Process sorting adjustments depending on active prioritization strategy
     table.sort(validPlots, function(a, b)
-        return a.ring < b.ring
+        if floorPriorityStrategy == "Lowest Floor First" then
+            return a.ring < b.ring
+        else
+            -- Inverse structural check to clear and upgrade highest items down first
+            return a.ring > b.ring
+        end
     end)
 
-    -- Return unpacked sequential instances
+    -- Unpack array configuration table sequence
     local sortedInstances = {}
     for i, data in ipairs(validPlots) do
         sortedInstances[i] = data.instance
@@ -228,7 +263,7 @@ local function getSortedFarmPlots()
     return sortedInstances
 end
 
--- Upgraded Best Seed Equipper Logic (Pure Base Value Comparison Pass)
+-- Upgraded Best Seed Equipper Logic (Fixes equal item swapping bug)
 local function equipBestSeed()
     local currentCharacter = Player.Character or character
     local humanoid = currentCharacter:FindFirstChildOfClass("Humanoid")
@@ -252,6 +287,7 @@ local function equipBestSeed()
                 if plantName and plantMutation and plantLevel then
                     local income = SharedUtils.CalculateIncome(plantName, plantMutation, plantLevel, 1)
                     
+                    -- Strict greater-than bounds checks stop bounce-equips on matched value items
                     if income and income > highestIncome then
                         highestIncome = income
                         bestTool = tool
@@ -535,7 +571,50 @@ local function startAutoPlant()
     end)
 end
 
--- LOOP 8: Auto Clear / Remove Plants Background Handler Loop
+-- LOOP 8: Auto Upgrade Plants Loop (Middle Child Execution Layer)
+local function startAutoUpgrade()
+    task.spawn(function()
+        while autoUpgradeEnabled and ScriptID == CurrentScriptID do
+            local sortedPlots = getSortedFarmPlots()
+            local brokeSafeguardActive = false
+
+            for _, v in ipairs(sortedPlots) do
+                if not autoUpgradeEnabled or ScriptID ~= CurrentScriptID then break end
+                
+                local dirt = v:FindFirstChild("Dirt")
+                if not dirt then continue end
+                
+                -- Only attempt upgrades if a valid plant name exists on this plot element
+                if dirt:GetAttribute("PlantName") then
+                    local success, received = pcall(function()
+                        return UpgradePlantEvent:InvokeServer(dirt)
+                    end)
+                    
+                    if success then
+                        if received == false then
+                            -- Insufficient money response detected; toggle safety switch to break loop scan pass early
+                            brokeSafeguardActive = true
+                            break
+                        end
+                    else
+                        -- Yield slightly if invoke fails due to environment factors
+                        task.wait(0.1)
+                    end
+                    task.wait(0.05) -- Clean anti-throttle yield timing step between distinct plots
+                end
+            end
+            
+            -- If broke, wait slightly longer before running the next full plot upgrade sweep to protect telemetry execution
+            if brokeSafeguardActive then
+                task.wait(2.5)
+            else
+                task.wait(0.5)
+            end
+        end
+    end)
+end
+
+-- LOOP 9: Auto Clear / Remove Plants Background Handler Loop
 local function startAutoClearPlants()
     task.spawn(function()
         while autoClearEnabled and ScriptID == CurrentScriptID do
@@ -607,6 +686,36 @@ MainTab:CreateToggle({
     end,
 })
 
+MainTab:CreateSection("--- Floor Configuration Filters ---")
+
+MainTab:CreateDropdown({
+    Name = "Target Floor Layer",
+    Options = {"All Floors", "Floor 1 Only", "Floor 2 Only", "Floor 3 Only"},
+    CurrentOption = activeFloorTarget,
+    Flag = "FloorSelectorDropdown",
+    Callback = function(Value)
+        if type(Value) == "table" then
+            activeFloorTarget = Value[1]
+        else
+            activeFloorTarget = Value
+        end
+    end,
+})
+
+MainTab:CreateDropdown({
+    Name = "Floor Processing Priority",
+    Options = {"Lowest Floor First", "Highest Floor First"},
+    CurrentOption = floorPriorityStrategy,
+    Flag = "FloorPriorityDropdown",
+    Callback = function(Value)
+        if type(Value) == "table" then
+            floorPriorityStrategy = Value[1]
+        else
+            floorPriorityStrategy = Value
+        end
+    end,
+})
+
 MainTab:CreateSection("--- Seed Operations ---")
 
 MainTab:CreateToggle({
@@ -664,6 +773,16 @@ MainTab:CreateToggle({
     Callback = function(Value)
         autoPlantEnabled = Value
         if Value then startAutoPlant() end
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Auto Upgrade Plants (Middle Child)",
+    CurrentValue = autoUpgradeEnabled,
+    Flag = "AutoUpgradeToggle",
+    Callback = function(Value)
+        autoUpgradeEnabled = Value
+        if Value then startAutoUpgrade() end
     end,
 })
 
