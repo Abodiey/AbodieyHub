@@ -22,9 +22,9 @@ local ShootRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Plan
 local RuntimeFolder = workspace:WaitForChild("InteractiveEvents").PlantRush.Runtime
 
 -- Fast local variables for toggles
-local autoSellEnabled = false
-local autoHoneycombEnabled = false
-local autoShootEnabled = false
+local autoSellEnabled = true
+local autoHoneycombEnabled = true
+local autoShootEnabled = true
 
 Player.CharacterAdded:Connect(function(char)
     character = char
