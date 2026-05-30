@@ -116,7 +116,7 @@ end
 -- UI Toggles
 Tab:CreateToggle({
     Name = "Auto Sell",
-    CurrentValue = false,
+    CurrentValue = autoSellEnabled,
     Flag = "AutoSellToggle",
     Callback = function(Value)
         autoSellEnabled = Value
@@ -126,7 +126,7 @@ Tab:CreateToggle({
 
 Tab:CreateToggle({
     Name = "Auto Farm Honey/Plants",
-    CurrentValue = false,
+    CurrentValue = autoHoneycombEnabled,
     Flag = "AutoFarmToggle",
     Callback = function(Value)
         autoHoneycombEnabled = Value
@@ -136,7 +136,7 @@ Tab:CreateToggle({
 
 Tab:CreateToggle({
     Name = "Auto Shoot Plants",
-    CurrentValue = false,
+    CurrentValue = autoShootEnabled,
     Flag = "AutoShootToggle",
     Callback = function(Value)
         autoShootEnabled = Value
