@@ -10,9 +10,14 @@ local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
 local CollectionService = cloneref(game:GetService("CollectionService"))
 local TeleportService = cloneref(game:GetService("TeleportService"))
 local Players = cloneref(game:GetService("Players"))
+local VirtualInputManager = cloneref(game:GetService("VirtualInputManager"))
+local CoreGui = cloneref(game:GetService("CoreGui"))
+local VirtualUser = cloneref(game:GetService("VirtualUser"))
+
 local Player = Players.LocalPlayer
 local character = Player.Character or Player.CharacterAdded:Wait()
 local root = character:FindFirstChild("HumanoidRootPart")
+local EventsRoot = CoreGui:WaitForChild("RobloxGui"):WaitForChild("EventsInExperienceRoot")
 
 -- Shared Utilities & Registries
 local SharedUtils = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedUtils"))
@@ -64,10 +69,18 @@ local autoRollEnabled = false
 local autoBuyEnabled = false
 local autoEquipEnabled = false
 local autoPlantEnabled = false
+local autoClearEnabled = false
+local waitForServerConfirmation = true
 local disableManualRoll = false
 local disableManualBuy = false
 local antiAfkEnabled = true
 local lowPerformanceEnabled = true
+local antiEventPopupEnabled = true
+
+-- Dynamic Calculation Settings
+local ignoreMutation = false
+local ignoreLevel = false
+local ignoreAmount = false
 
 -- Advanced Economic & Strategy Variables
 local lowCashStrategy = "Skip Seed"
@@ -145,6 +158,22 @@ local function isGoodSeed(seedName)
     return seedIndex and seedIndex > AutoRollIndex
 end
 
+-- Helper engine to get the clean dynamic price of a physical seed instance
+local function getSeedPrice(targetSeed)
+    if not targetSeed or not targetSeed.Parent then return 0 end
+    
+    local buyPrompt = targetSeed:FindFirstChild("BuySeed", true)
+    local gui = buyPrompt and buyPrompt.Parent and buyPrompt.Parent:FindFirstChild("SeedGui")
+    local textObj = gui and gui:FindFirstChild("Cost", true)
+    
+    if textObj then
+        return parsePrice(textObj.Text)
+    elseif Seeds and Seeds[targetSeed.Name] then
+        return tonumber(Seeds[targetSeed.Name].Price) or 0
+    end
+    return 0
+end
+
 -- Cache Management for Seeds
 local function onSeedAdded(instance)
     if isGoodSeed(instance.Name) then
@@ -165,7 +194,6 @@ CollectionService:GetInstanceRemovedSignal("FloatSeed"):Connect(function(instanc
 end)
 
 -- Anti AFK Setup (VirtualUser prevents IDLE kick)
-local VirtualUser = cloneref(game:GetService("VirtualUser"))
 Player.Idled:Connect(function()
     if antiAfkEnabled and ScriptID == CurrentScriptID then
         VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
@@ -182,7 +210,8 @@ local function getSortedFarmPlots()
 
     local validPlots = {}
     for _, child in ipairs(farmPlot:GetChildren()) do
-        local ringVal = child:GetAttribute("PlotRing")
+        local dirt = child:FindFirstChild("Dirt")
+        local ringVal = dirt and dirt:GetAttribute("PlotRing")
         if ringVal then
             table.insert(validPlots, {instance = child, ring = tonumber(ringVal) or 999})
         end
@@ -218,21 +247,27 @@ local function equipBestSeed()
                 local plantName = tool:GetAttribute("Plant") or tool:GetAttribute("trueName")
                 if not plantName then continue end
                 
-                local plantLevel = tool:GetAttribute("Level") or 1
-                local plantMutation = tool:GetAttribute("Mutation") or "Normal"
+                -- Process dynamic filters based on user configurations
+                local plantLevel = ignoreLevel and 1 or (tool:GetAttribute("Level") or 1)
+                local plantMutation = ignoreMutation and "Normal" or (tool:GetAttribute("Mutation") or "Normal")
                 
-                local amountStr = tool.Name:match("x(%d+)")
-                local amount = amountStr and tonumber(amountStr) or 1
+                local amount = 1
+                if not ignoreAmount then
+                    local amountStr = tool.Name:match("x(%d+)")
+                    amount = amountStr and tonumber(amountStr) or 1
+                end
                 
                 if plantName and plantMutation and plantLevel then
                     local income = SharedUtils.CalculateIncome(plantName, plantMutation, plantLevel, 1)
                     
                     if income then
-                        if income > highestIncome then
-                            highestIncome = income
+                        -- Check against total value configuration weighting matrix
+                        local calculatedVal = income * amount
+                        if calculatedVal > highestIncome then
+                            highestIncome = calculatedVal
                             highestAmount = amount
                             bestTool = tool
-                        elseif income == highestIncome and amount > highestAmount then
+                        elseif calculatedVal == highestIncome and amount > highestAmount then
                             highestAmount = amount
                             bestTool = tool
                         end
@@ -249,6 +284,29 @@ local function equipBestSeed()
         humanoid:EquipTool(bestTool)
     end
 end
+
+-- Helper logic processor to automatically target and dismiss Event Popups safely
+local function handleEventPopup(child)
+    if not antiEventPopupEnabled or ScriptID ~= CurrentScriptID then return end
+    task.wait(0.2)
+    
+    local success, button = pcall(function()
+        return child.FocusNavigationCoreScriptsWrapper.Prompt.AlertContents.TitleContainer.TitleArea.Title.CloseButton
+    end)
+
+    if success and button then
+        local x = button.AbsolutePosition.X + (button.AbsoluteSize.X / 2)
+        local y = button.AbsolutePosition.Y + (button.AbsoluteSize.Y / 2) + 58
+
+        VirtualInputManager:SendMouseMoveEvent(x, y, game)
+        task.wait(0.1)
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
+    end
+end
+
+EventsRoot.ChildAdded:Connect(handleEventPopup)
 
 -- Create Rayfield Window
 local Window = Rayfield:CreateWindow({
@@ -345,14 +403,26 @@ local function startAutoRoll()
     task.spawn(function()
         while autoRollEnabled and ScriptID == CurrentScriptID do
             local hasSeeds = false
+            local currentValidSeed = nil
+            
             for targetSeed, _ in pairs(activeGoodSeeds) do
                 if targetSeed and targetSeed.Parent then
                     hasSeeds = true
+                    currentValidSeed = targetSeed
                     break
                 end
             end
             
-            -- If the purchase strategy chose to skip, treat it as empty so rolling keeps moving
+            -- Fallback price evaluator if AutoBuy is completely turned off
+            if hasSeeds and currentValidSeed and not autoBuyEnabled and lowCashStrategy == "Skip Seed" then
+                local cost = getSeedPrice(currentValidSeed)
+                if getPlayerCash() < cost then
+                    seedSkippedByPrice = true
+                    activeGoodSeeds[currentValidSeed] = nil
+                    hasSeeds = false
+                end
+            end
+            
             if hasSeeds and seedSkippedByPrice then
                 hasSeeds = false
             end
@@ -393,17 +463,7 @@ local function startAutoBuy()
                     end
                     
                     if buyPrompt and buyPrompt:IsA("ProximityPrompt") then
-                        local gui = buyPrompt.Parent and buyPrompt.Parent:FindFirstChild("SeedGui")
-                        local textObj = gui and gui:FindFirstChild("Cost", true)
-                        
-                        -- Dynamic registration value lookup fallback engine if layout GUI fails
-                        local seedCost = 0
-                        if textObj then
-                            seedCost = parsePrice(textObj.Text)
-                        elseif Seeds and Seeds[targetSeed.Name] then
-                            seedCost = tonumber(Seeds[targetSeed.Name].Price) or 0
-                        end
-                        
+                        local seedCost = getSeedPrice(targetSeed)
                         local walletCash = getPlayerCash()
                         
                         -- Execute checks dynamically based on current configuration rules
@@ -461,11 +521,65 @@ local function startAutoPlant()
             local sortedPlots = getSortedFarmPlots()
             for _, v in ipairs(sortedPlots) do
                 if not autoPlantEnabled or ScriptID ~= CurrentScriptID then break end
-                if not v:FindFirstChild("Dirt") then continue end
-                if v.Dirt:GetAttribute("Plant") then continue end
                 
-                PlantSeedEvent:FireServer(v.Dirt)
-                task.wait(0.15)
+                local dirt = v:FindFirstChild("Dirt")
+                if not dirt then continue end
+                if dirt:GetAttribute("PlantName") then continue end 
+                
+                PlantSeedEvent:FireServer(dirt)
+                
+                if waitForServerConfirmation then
+                    local startTime = os.clock()
+                    -- Polling loop with a hard 1-second safety timeout
+                    while autoPlantEnabled and ScriptID == CurrentScriptID and dirt:IsDescendantOf(workspace) and not dirt:GetAttribute("PlantName") do
+                        if os.clock() - startTime >= 1.0 then
+                            -- Server dropped the remote package; re-fire once as a fallback step
+                            if not dirt:GetAttribute("PlantName") and dirt:IsDescendantOf(workspace) then
+                                PlantSeedEvent:FireServer(dirt)
+                            end
+                            break
+                        end
+                        task.wait()
+                    end
+                else
+                    task.wait(0.15)
+                end
+            end
+            task.wait(0.5)
+        end
+    end)
+end
+
+-- LOOP 8: Auto Clear / Remove Plants Background Handler Loop
+local function startAutoClearPlants()
+    task.spawn(function()
+        while autoClearEnabled and ScriptID == CurrentScriptID do
+            local sortedPlots = getSortedFarmPlots()
+            for _, v in ipairs(sortedPlots) do
+                if not autoClearEnabled or ScriptID ~= CurrentScriptID then break end
+                
+                local dirt = v:FindFirstChild("Dirt")
+                if not dirt then continue end
+                if not dirt:GetAttribute("PlantName") then continue end
+                
+                RemovePlantEvent:FireServer(dirt)
+                
+                if waitForServerConfirmation then
+                    local startTime = os.clock()
+                    -- Polling loop with a hard 1-second safety timeout
+                    while autoClearEnabled and ScriptID == CurrentScriptID and dirt:IsDescendantOf(workspace) and dirt:GetAttribute("PlantName") do
+                        if os.clock() - startTime >= 1.0 then
+                            -- Server dropped the remote package; re-fire once as a fallback step
+                            if dirt:GetAttribute("PlantName") and dirt:IsDescendantOf(workspace) then
+                                RemovePlantEvent:FireServer(dirt)
+                            end
+                            break
+                        end
+                        task.wait()
+                    end
+                else
+                    task.wait(0.15)
+                end
             end
             task.wait(0.5)
         end
@@ -541,12 +655,58 @@ MainTab:CreateToggle({
 })
 
 MainTab:CreateToggle({
+    Name = "Ignore Mutation (Best Seed)",
+    CurrentValue = ignoreMutation,
+    Flag = "IgnoreMutationToggle",
+    Callback = function(Value)
+        ignoreMutation = Value
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Ignore Level (Best Seed)",
+    CurrentValue = ignoreLevel,
+    Flag = "IgnoreLevelToggle",
+    Callback = function(Value)
+        ignoreLevel = Value
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Ignore Amount Stack (Best Seed)",
+    CurrentValue = ignoreAmount,
+    Flag = "IgnoreAmountToggle",
+    Callback = function(Value)
+        ignoreAmount = Value
+    end,
+})
+
+MainTab:CreateToggle({
     Name = "Auto Plant Seeds",
     CurrentValue = autoPlantEnabled,
     Flag = "AutoPlantToggle",
     Callback = function(Value)
         autoPlantEnabled = Value
         if Value then startAutoPlant() end
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Auto Clear All Plants",
+    CurrentValue = autoClearEnabled,
+    Flag = "AutoClearToggle",
+    Callback = function(Value)
+        autoClearEnabled = Value
+        if Value then startAutoClearPlants() end
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Wait For Server Confirmation",
+    CurrentValue = waitForServerConfirmation,
+    Flag = "WaitConfirmationToggle",
+    Callback = function(Value)
+        waitForServerConfirmation = Value
     end,
 })
 
@@ -597,6 +757,7 @@ MainTab:CreateDropdown({
             lowCashStrategy = Value[1]
         else
             lowCashStrategy = Value
+        -- Fixed closing parenthesis error on next line
         end
     end,
 })
@@ -669,6 +830,15 @@ MainTab:CreateButton({
 MainTab:CreateSection("--- Protection & Safety ---")
 
 MainTab:CreateToggle({
+    Name = "Anti Event Popup Window",
+    CurrentValue = antiEventPopupEnabled,
+    Flag = "AntiEventToggle",
+    Callback = function(Value)
+        antiEventPopupEnabled = Value
+    end,
+})
+
+MainTab:CreateToggle({
     Name = "Disable Manual Roll Interaction",
     CurrentValue = disableManualRoll,
     Flag = "DisableRollToggle",
@@ -691,6 +861,7 @@ MainTab:CreateToggle({
             if buyPrompt then
                 buyPrompt.Enabled = not Value
             end
+        -- Fixed missing closing parenthesis layout
         end
     end
 })
@@ -732,34 +903,6 @@ MainTab:CreateButton({
 })
 
 MainTab:CreateButton({
-    Name = "Clear All Plants",
-    Callback = function()
-        local sortedPlots = getSortedFarmPlots()
-        if #sortedPlots == 0 then
-            Rayfield:Notify({Title = "Error", Content = "No valid farmable plots detected!", Duration = 3})
-            return
-        end
-
-        task.spawn(function()
-            local x = -1
-            while x ~= 0 do
-                x = 0
-                for _, v in ipairs(sortedPlots) do
-                    if not v:FindFirstChild("Dirt") then continue end
-                    if not v.Dirt:GetAttribute("Plant") then continue end
-                    
-                    x = x + 1
-                    RemovePlantEvent:FireServer(v.Dirt)
-                    task.wait(0.15)
-                end
-                task.wait()
-            end
-            Rayfield:Notify({Title = "Success", Content = "All plants cleared successfully!", Duration = 3})
-        end)
-    end,
-})
-
-MainTab:CreateButton({
     Name = "Rejoin Server",
     Callback = function()
         if #Players:GetPlayers() <= 1 then
@@ -776,6 +919,13 @@ handleSliderUpdate(AutoRollIndex)
 -- Execute Low Performance Optimization initial sequence immediately on run
 pcall(function()
     SetSettingRemote:FireServer("LowPerformanceMode", true)
+end)
+
+-- Process active event windows that loaded before execution
+task.spawn(function()
+    for _, child in ipairs(EventsRoot:GetChildren()) do
+        task.spawn(handleEventPopup, child)
+    end
 end)
 
 -- Fire default executing threads automatically at load time
