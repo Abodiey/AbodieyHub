@@ -17,9 +17,19 @@ local root = character:FindFirstChild("HumanoidRootPart")
 -- Shared Utilities & Registries
 local SharedUtils = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedUtils"))
 local PlantsRegistry = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Registry"):WaitForChild("Plants")
-local Seeds = require(PlantsRegistry)
-local OrderedSeeds = Seeds.GetPlantsForIndex()
-Seeds.GetPlantsForIndex = nil -- Clean up the function reference from the module table copy
+
+-- Isolate the data table to prevent changing the global module cache reference
+local RegistryData = require(PlantsRegistry)
+local OrderedSeeds = RegistryData.GetPlantsForIndex()
+
+-- Create our own clean local reference table of the seed metadata entries
+local Seeds = {}
+for k, v in pairs(RegistryData) do
+    if k ~= "GetPlantsForIndex" then
+        Seeds[k] = v
+    end
+end
+RegistryData = nil -- Clear local pointer copy reference
 
 -- Folder, Remote & Map References
 local Honeycombs = workspace.InteractiveEvents.QueenBee.RuntimeHoneycombs
@@ -60,7 +70,7 @@ local antiAfkEnabled = true
 local lowPerformanceEnabled = true
 
 -- Advanced Economic & Strategy Variables
-local lowCashStrategy = "Skip Seed" -- Adjusted default fallback state
+local lowCashStrategy = "Skip Seed"
 local lowCashWaitTimeLimit = 10
 local seedSkippedByPrice = false
 local targetCodeText = ""
@@ -447,7 +457,7 @@ end
 -- LOOP 7: Auto Plant Seeds Background Handler Loop
 local function startAutoPlant()
     task.spawn(function()
-        while autoPlantEnabled and ScriptID == CurrentScriptID do
+        while autoPlantEnabled park and ScriptID == CurrentScriptID do
             local sortedPlots = getSortedFarmPlots()
             for _, v in ipairs(sortedPlots) do
                 if not autoPlantEnabled or ScriptID ~= CurrentScriptID then break end
