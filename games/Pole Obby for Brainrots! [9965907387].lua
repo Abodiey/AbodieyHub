@@ -2,10 +2,6 @@
 getgenv().ScriptID = os.clock()
 local CurrentScriptId = getgenv().ScriptID
 
--- REMINDER FOR REFACTORING:
--- Rely completely on global environment mapping for variable injection.
--- Use 'ScriptID == CurrentScriptId' directly inside your loops.
-
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
 -- Create the main window
@@ -37,8 +33,10 @@ local RedeemEvent = Packages.Net["RE/SafeZoneEvent"]
 local RequestStatsUpgrade = Packages.Net["RE/RequestStatsUpgrade"]
 local RequestRebirth = Packages.Net["RE/RequestRebirth"]
 local UpgradeBrainrotEvent = Packages.Net["RE/UpgradeBrainrot"]
+local BrainrotShopAction = Packages.Net["RF/BrainrotShopAction"]
 
 local BrainrotList = require(ReplicatedStorage.GameData.BrainrotList)
+local MutationList = require(ReplicatedStorage.GameData.MutationList)
 
 local ORIGIN_POINT = Vector3.new(-9, 127, -2)
 local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
@@ -53,7 +51,45 @@ LocalPlayer.CharacterAdded:Connect(function(newCharacter)
 end)
 
 -- Global setting configuration
-local minDistanceConfig = 200
+local minCashPerSecondConfig = 0
+local autoSellThresholdConfig = 16666665
+
+-- Suffix table designed to handle game shorthand alphanumeric text formats
+local SuffixValues = {
+    ["K"]   = 1e3,
+    ["M"]   = 1e6,
+    ["B"]   = 1e9,
+    ["T"]   = 1e12,
+    ["QA"]  = 1e15,
+    ["QI"]  = 1e18,
+    ["SX"]  = 1e21,
+    ["SP"]  = 1e24,
+    ["OC"]  = 1e27,
+    ["NO"]  = 1e30,
+    ["DC"]  = 1e33
+}
+
+-- Converts localized currency/stat strings into pure mathematical numbers
+local function parseFormattedString(str)
+    if not str or str == "" then return 0 end
+    
+    -- Normalize format: uppercase, strip dollar signs, strip /s notation, swap commas to decimals
+    local normalized = string.upper(str)
+    normalized = string.gsub(normalized, "%$", "")
+    normalized = string.gsub(normalized, "/S", "")
+    normalized = string.gsub(normalized, ",", ".")
+    
+    -- Extract number component and abbreviation component
+    local numericPart = string.match(normalized, "[%d%.]+")
+    local suffixPart  = string.match(normalized, "[A-Z]+")
+    
+    local baseValue = tonumber(numericPart) or 0
+    if suffixPart and SuffixValues[suffixPart] then
+        return baseValue * SuffixValues[suffixPart]
+    end
+    
+    return baseValue
+end
 
 -- Dynamically find the player's base based on OwnerID attribute
 local function getYourBase()
@@ -66,13 +102,14 @@ local function getYourBase()
     return nil
 end
 
--- Find the furthest mob from the origin point (must be past minDistanceConfig)
+-- Scans all active mobs and selectively filters out the highest money-generating target
 local function getTarget()
     local mobChildren = Mobs:GetChildren()
     if #mobChildren == 0 then return nil, nil end
 
-    local longestDistance = -1
-    local chosenPrompt, chosenPart
+    local highestCashPerSecond = -1
+    local bestPrompt = nil
+    local bestMobRoot = nil
 
     for _, mob in ipairs(mobChildren) do
         if ScriptID ~= CurrentScriptId then return nil, nil end
@@ -81,15 +118,25 @@ local function getTarget()
         local prompt = mobRoot and mobRoot:FindFirstChildOfClass("ProximityPrompt")
         
         if prompt and prompt.Enabled then
-            local distance = (ORIGIN_POINT - mobRoot.Position).Magnitude
-            if distance >= minDistanceConfig and distance > longestDistance then
-                longestDistance = distance
-                chosenPrompt = prompt
-                chosenPart = mobRoot
+            -- Navigate deep down into the requested structural hierarchy paths
+            local overheadAttach = mobRoot:FindFirstChild("OverheadAttach")
+            local animalOverhead = overheadAttach and overheadAttach:FindFirstChild("AnimalOverhead")
+            local generation     = animalOverhead and animalOverhead:FindFirstChild("Generation")
+            
+            if generation and generation:IsA("TextLabel") then
+                local mobCashPerSecond = parseFormattedString(generation.Text)
+                
+                -- Verify if the target meets the minimum condition and beats our current top choice
+                if mobCashPerSecond >= minCashPerSecondConfig and mobCashPerSecond > highestCashPerSecond then
+                    highestCashPerSecond = mobCashPerSecond
+                    bestPrompt = prompt
+                    bestMobRoot = mobRoot
+                end
             end
         end
     end
-    return chosenPrompt, chosenPart
+    
+    return bestPrompt, bestMobRoot
 end
 
 -- Steal target action (used by both the toggle loop and one-time button)
@@ -118,7 +165,7 @@ local function stealTarget()
         end
         task.wait(0.1)
     else
-        task.wait(0.5)
+        task.wait(0.2) -- Quick cycle search check rate
     end
 end
 
@@ -185,24 +232,54 @@ local function collectBaseMoney()
     end
 end
 
--- Loops through base slots and fires the upgrade remote with a protective yield
-local function upgradeAllSlots()
+-- Scans all valid base upgrades, detects pricing structures, and fires the upgrade remote on the cheapest choice
+local function upgradeCheapestSlot()
     local myBase = getYourBase()
     if not myBase then return end
 
     local slotsFolder = myBase:FindFirstChild("Slots")
     if not slotsFolder then return end
 
+    local lowestCost = math.huge
+    local targetSlotNumber = nil
+
     for _, slot in ipairs(slotsFolder:GetChildren()) do
+        if ScriptID ~= CurrentScriptId then return end
+        
+        local upgradeModel = slot:FindFirstChild("Upgrade")
+        local surfaceGui  = upgradeModel and upgradeModel:FindFirstChild("SurfaceGui")
+        local frame       = surfaceGui and surfaceGui:FindFirstChild("Frame")
+        local costLabel   = frame and frame:FindFirstChild("Cost")
+
+        if costLabel and costLabel:IsA("TextLabel") then
+            local currentPrice = parseFormattedString(costLabel.Text)
+            
+            if currentPrice < lowestCost then
+                local slotString = string.match(slot.Name, "%d+")
+                local slotNumber = slotString and tonumber(slotString)
+                
+                if slotNumber then
+                    lowestCost = currentPrice
+                    targetSlotNumber = slotNumber
+                end
+            end
+        end
+    end
+
+    if targetSlotNumber then
+        UpgradeBrainrotEvent:FireServer(targetSlotNumber)
+    end
+end
+
+-- Scans the Workspace and permanently deletes replication instances of harmful touch scripts
+local function disableKillParts()
+    for _, v in ipairs(workspace:GetDescendants()) do
         if ScriptID ~= CurrentScriptId then break end
-        
-        -- Pull out digits from slot names safely as numbers
-        local slotString = string.match(slot.Name, "%d+")
-        local slotNumber = slotString and tonumber(slotString)
-        
-        if slotNumber then
-            UpgradeBrainrotEvent:FireServer(slotNumber)
-            task.wait(0.05) -- Pacing delay between slots to protect network ping from climbing
+        if v:IsA("BasePart") and string.find(v.Name, "Kill") then
+            local touchInterest = v:FindFirstChild("TouchInterest")
+            if touchInterest then
+                touchInterest:Destroy()
+            end
         end
     end
 end
@@ -218,13 +295,11 @@ local function fixBaseProblems()
     for _, slot in ipairs(slotsFolder:GetChildren()) do
         local active = slot:FindFirstChild("ActiveBrainrot")
         if active then
-            -- Fix RootPart Transparency
             local rootPart = active:FindFirstChild("RootPart")
             if rootPart and rootPart:IsA("BasePart") then
                 if rootPart.Transparency ~= 1 then rootPart.Transparency = 1 end
             end
 
-            -- Fix VfxInstance properties
             local vfx = active:FindFirstChild("VfxInstance")
             if vfx then
                 if vfx:IsA("BasePart") then
@@ -290,7 +365,6 @@ local function pickupAllFromBase()
                 root.AssemblyLinearVelocity = Vector3.zero
                 root.AssemblyAngularVelocity = Vector3.zero
                 
-                -- Paced prompt activation loop to prevent frame dropping
                 while slot:FindFirstChild("ActiveBrainrot") and root and root:IsDescendantOf(workspace) do
                     if ScriptID ~= CurrentScriptId then break end
                     fireproximityprompt(prompt)
@@ -324,7 +398,6 @@ local function placeAllIntoBase()
                 root.AssemblyLinearVelocity = Vector3.zero
                 root.AssemblyAngularVelocity = Vector3.zero
                 
-                -- Paced prompt activation loop to prevent frame dropping
                 while not slot:FindFirstChild("ActiveBrainrot") and root and root:IsDescendantOf(workspace) do
                     if ScriptID ~= CurrentScriptId then break end
                     fireproximityprompt(prompt)
@@ -348,14 +421,12 @@ local function executeRebirthProcess()
 
     local MaxBoostCapacity = 40 + (Data.Rebirth or 0) * 10
 
-    -- Perform the stats upgrading sequence
     while Boost < MaxBoostCapacity do
         if ScriptID ~= CurrentScriptId then return end
         
         local UpgradeAmount = (MaxBoostCapacity - Boost >= 5) and 5 or 1
         RequestStatsUpgrade:FireServer("Boost", UpgradeAmount)
         
-        -- Safely wait for attribute response with a lifecycle script check backup
         local changedSignal = LocalPlayer:GetAttributeChangedSignal("Boost")
         local updated = false
         local connection
@@ -365,7 +436,6 @@ local function executeRebirthProcess()
             connection:Disconnect()
         end)
         
-        -- Yield processing slightly to let backend respond or break if script refreshed
         while not updated do
             if ScriptID ~= CurrentScriptId then
                 if connection then connection:Disconnect() end
@@ -382,42 +452,128 @@ local function executeRebirthProcess()
         end
     end
 
-    -- Run rebirth remote call once target requirements are filled
     if Boost >= MaxBoostCapacity then
         RequestRebirth:FireServer()
-        task.wait(0.5) -- Cool down allowance for data state updating
+        task.wait(0.5)
     end
 end
 
 -- Create a Single Tab for features
 local MainTab = Window:CreateTab("Main Features", 4483362458)
 
--- State Variables for the toggles
+-- Default State Values (Configured to be ON by default per instructions)
+local autoCollectEnabled = true
+local autoFixEnabled = true
+local antiKillEnabled = true
+
+-- Remaining State Variables
 local autoStealEnabled = false
 local autoEquipEnabled = false
+local autoSellCheapEnabled = false
 local autoPickupEnabled = false
 local autoPlaceEnabled = false
-local autoFixEnabled = false
-local autoCollectEnabled = false
 local autoUpgradeEnabled = false
 local autoRebirthEnabled = false
 local autoRedeemEnabled = false
+
+-- UI Toggle Elements stored as variables to allow for dynamic state changes
+local AutoEquipToggle = nil
+local AutoSellToggle = nil
+
+-- Background worker thread handling the selective evaluation and execution of the item liquidation cycle
+local function runAutoSellProcess()
+    while autoSellCheapEnabled and ScriptID == CurrentScriptId do
+        local currentCharacter = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+        local currentHumanoid = currentCharacter:WaitForChild("Humanoid", 5)
+        
+        if currentHumanoid then
+            local validTools = {}
+            local backpack = LocalPlayer:FindFirstChild("Backpack")
+            
+            if backpack then
+                for _, t in ipairs(backpack:GetChildren()) do
+                    if t:IsA("Tool") and t:GetAttribute("Level") ~= nil then 
+                        table.insert(validTools, t)
+                    end
+                end
+            end
+            
+            if #validTools > 0 then 
+                local randomTool = validTools[math.random(1, #validTools)]
+                currentHumanoid:EquipTool(randomTool) 
+            end
+
+            local brainrotName, mutationName
+            local childConnection
+            
+            childConnection = currentCharacter.ChildAdded:Connect(function(child)
+                if child:IsA("Model") and child:GetAttribute("BrainrotLvl") then
+                    if string.find(child.Name, "_") then
+                        local segments = string.split(child.Name, "_")
+                        brainrotName = segments[1]
+                        mutationName = child:GetAttribute("Mutation")
+                    end
+                end
+            end)
+
+            while autoSellCheapEnabled and ScriptID == CurrentScriptId and not brainrotName do
+                task.wait()
+            end
+            
+            if childConnection then 
+                childConnection:Disconnect() 
+            end
+
+            if brainrotName and autoSellCheapEnabled and ScriptID == CurrentScriptId then
+                local brainrotData = BrainrotList[brainrotName]
+                local mutationData = mutationName and MutationList[mutationName] or nil
+
+                if brainrotData then
+                    local baseGen = brainrotData.Generation or 0
+                    local multiplier = mutationData and mutationData.Multiplier or 1
+                    local total = baseGen * multiplier
+
+                    task.defer(function()
+                        print(string.format("[CATSTAR] Name: %s | Mutation: %s | Total: %s", brainrotName, mutationName or "None", total))
+                    end)
+
+                    if total < autoSellThresholdConfig then
+                        BrainrotShopAction:InvokeServer(1)
+                        task.wait(0.2) 
+                    else
+                        currentHumanoid:UnequipTools()
+                    end
+                end
+            end
+
+            while autoSellCheapEnabled and ScriptID == CurrentScriptId and currentCharacter:FindFirstChildOfClass("Model") do
+                task.wait()
+            end
+        end
+        task.wait(0.1)
+    end
+end
 
 ---
 -- CONFIGURATION SECTION
 ---
 MainTab:CreateSection("Configurations")
 
-MainTab:CreateSlider({
-   Name = "Minimum Distance From Origin",
-   Info = "Mobs closer than this distance will be ignored.",
-   Range = {0, 2000},
-   Increment = 10,
-   Suffix = "Studs",
-   CurrentValue = 200,
-   Flag = "MinDistanceSlider",
-   Callback = function(Value)
-      minDistanceConfig = Value
+MainTab:CreateInput({
+   Name = "Minimum Cash Per Second",
+   PlaceholderText = "Ex: 1.5B, 20.1B, 500K...",
+   RemoveTextAfterFocusLost = false,
+   Callback = function(Text)
+      minCashPerSecondConfig = parseFormattedString(Text)
+   end,
+})
+
+MainTab:CreateInput({
+   Name = "Auto Sell Threshold",
+   PlaceholderText = "Default: 16.66M (16666665)",
+   RemoveTextAfterFocusLost = false,
+   Callback = function(Text)
+      autoSellThresholdConfig = parseFormattedString(Text)
    end,
 })
 
@@ -433,7 +589,6 @@ MainTab:CreateToggle({
       autoStealEnabled = Value
       if autoStealEnabled then
          task.spawn(function()
-            -- Continuous background thread to force kill velocity while farming is active
             task.spawn(function()
                 while autoStealEnabled and ScriptID == CurrentScriptId do
                     if root and root:IsDescendantOf(workspace) then
@@ -453,7 +608,7 @@ MainTab:CreateToggle({
 })
 
 MainTab:CreateButton({
-   Name = "Steal Next Mob (One-Time)",
+   Name = "Steal Next Valid Mob (One-Time)",
    Callback = function()
       task.spawn(stealTarget)
    end,
@@ -492,9 +647,9 @@ MainTab:CreateButton({
 ---
 MainTab:CreateSection("Base Management")
 
-MainTab:CreateToggle({
+local CollectToggle = MainTab:CreateToggle({
    Name = "Loop Auto Collect Money",
-   CurrentValue = false,
+   CurrentValue = true,
    Callback = function(Value)
       autoCollectEnabled = Value
       if autoCollectEnabled then
@@ -516,15 +671,15 @@ MainTab:CreateButton({
 })
 
 MainTab:CreateToggle({
-   Name = "Loop Auto Upgrade Slots",
+   Name = "Loop Auto Upgrade Cheapest Slot",
    CurrentValue = false,
    Callback = function(Value)
       autoUpgradeEnabled = Value
       if autoUpgradeEnabled then
          task.spawn(function()
             while autoUpgradeEnabled and ScriptID == CurrentScriptId do
-                upgradeAllSlots()
-                task.wait(1.5) -- Rest between complete cycles to prevent long-term ping accumulation
+                upgradeCheapestSlot()
+                RunService.Heartbeat:Wait()
             end
          end)
       end
@@ -532,9 +687,9 @@ MainTab:CreateToggle({
 })
 
 MainTab:CreateButton({
-   Name = "Upgrade Slots Once (One-Time)",
+   Name = "Upgrade Cheapest Slot Once (One-Time)",
    Callback = function()
-      upgradeAllSlots()
+      task.spawn(upgradeCheapestSlot)
    end,
 })
 
@@ -557,7 +712,7 @@ MainTab:CreateToggle({
 MainTab:CreateButton({
    Name = "Pickup All Slots Once (One-Time)",
    Callback = function()
-      task.spawn(pickupAllFromBase)
+      pickupAllFromBase()
    end,
 })
 
@@ -580,13 +735,13 @@ MainTab:CreateToggle({
 MainTab:CreateButton({
    Name = "Place Brainrot Once (One-Time)",
    Callback = function()
-      task.spawn(placeAllIntoBase)
+      placeAllIntoBase()
    end,
 })
 
-MainTab:CreateToggle({
+local FixToggle = MainTab:CreateToggle({
    Name = "Auto Fix Clutter / Problems",
-   CurrentValue = false,
+   CurrentValue = true,
    Callback = function(Value)
       autoFixEnabled = Value
       if autoFixEnabled then
@@ -608,16 +763,38 @@ MainTab:CreateButton({
 })
 
 ---
--- GEAR SECTION
+-- GEAR & DEFENSE SECTION
 ---
-MainTab:CreateSection("Brainrot Weapons")
+MainTab:CreateSection("Combat & Defense")
 
-MainTab:CreateToggle({
+local AntiKillToggle = MainTab:CreateToggle({
+   Name = "Anti-Kill (Strip Touch Hazards)",
+   CurrentValue = true,
+   Callback = function(Value)
+      antiKillEnabled = Value
+      if antiKillEnabled then
+         task.spawn(function()
+            while antiKillEnabled and ScriptID == CurrentScriptId do
+                disableKillParts()
+                task.wait(1)
+            end
+         end)
+      end
+   end,
+})
+
+AutoEquipToggle = MainTab:CreateToggle({
    Name = "Loop Auto Equip Best Brainrot",
    CurrentValue = false,
    Callback = function(Value)
       autoEquipEnabled = Value
       if autoEquipEnabled then
+         -- Force-disable conflicting automation loop safely
+         if autoSellCheapEnabled then
+            autoSellCheapEnabled = false
+            AutoSellToggle:Set(false)
+         end
+         
          task.spawn(function()
             while autoEquipEnabled and ScriptID == CurrentScriptId do
                 equipBestBrainrot()
@@ -633,6 +810,23 @@ MainTab:CreateButton({
    Callback = function()
       equipBestBrainrot()
    end
+})
+
+AutoSellToggle = MainTab:CreateToggle({
+   Name = "Auto Equip & Auto Sell Cheap Brainrots",
+   CurrentValue = false,
+   Callback = function(Value)
+      autoSellCheapEnabled = Value
+      if autoSellCheapEnabled then
+         -- Force-disable conflicting automation loop safely
+         if autoEquipEnabled then
+            autoEquipEnabled = false
+            AutoEquipToggle:Set(false)
+         end
+         
+         task.spawn(runAutoSellProcess)
+      end
+   end,
 })
 
 ---
@@ -662,6 +856,28 @@ MainTab:CreateButton({
       RedeemEvent:FireServer()
    end,
 })
+
+-- Handle initial execution triggers for defaults
+task.spawn(function()
+    while autoCollectEnabled and ScriptID == CurrentScriptId do
+        collectBaseMoney()
+        task.wait(0.5)
+    end
+end)
+
+task.spawn(function()
+    while autoFixEnabled and ScriptID == CurrentScriptId do
+        fixBaseProblems()
+        task.wait(0.5)
+    end
+end)
+
+task.spawn(function()
+    while antiKillEnabled and ScriptID == CurrentScriptId do
+        disableKillParts()
+        task.wait(1)
+    end
+end)
 
 -- Initialize Rayfield (Load the UI fully)
 Rayfield:LoadConfiguration()
