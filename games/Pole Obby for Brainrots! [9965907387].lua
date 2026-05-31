@@ -185,7 +185,7 @@ local function collectBaseMoney()
     end
 end
 
--- Loops through base slots, extracts the numeric value from the name, and fires the upgrade remote
+-- Loops through base slots and fires the upgrade remote with a protective yield
 local function upgradeAllSlots()
     local myBase = getYourBase()
     if not myBase then return end
@@ -196,12 +196,13 @@ local function upgradeAllSlots()
     for _, slot in ipairs(slotsFolder:GetChildren()) do
         if ScriptID ~= CurrentScriptId then break end
         
-        -- Pull out digits from slot names like "Slot1" or "Slot_12" safely as numbers
+        -- Pull out digits from slot names safely as numbers
         local slotString = string.match(slot.Name, "%d+")
         local slotNumber = slotString and tonumber(slotString)
         
         if slotNumber then
             UpgradeBrainrotEvent:FireServer(slotNumber)
+            task.wait(0.05) -- Pacing delay between slots to protect network ping from climbing
         end
     end
 end
@@ -523,7 +524,7 @@ MainTab:CreateToggle({
          task.spawn(function()
             while autoUpgradeEnabled and ScriptID == CurrentScriptId do
                 upgradeAllSlots()
-                task.wait(1) -- Frequency delay between fully upgrading cycles
+                task.wait(1.5) -- Rest between complete cycles to prevent long-term ping accumulation
             end
          end)
       end
