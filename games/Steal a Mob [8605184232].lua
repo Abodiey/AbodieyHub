@@ -13,6 +13,7 @@ local plotsFolder = workspace:WaitForChild("Plots")
 
 -- Find our plot by matching the Owner attribute
 local myPlot = nil
+while plotsFolder:GetChildren() < 8 do task.wait() end
 for _, plot in ipairs(plotsFolder:GetChildren()) do
     if plot:GetAttribute("Owner") == localPlayer.UserId then
         myPlot = plot
