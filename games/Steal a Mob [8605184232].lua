@@ -28,7 +28,7 @@ local buttonsFolder = myPlot:WaitForChild("Buttons")
 -- Remote event for Kill Aura
 local validateHitEvent = game:GetService("ReplicatedStorage"):WaitForChild("Events"):WaitForChild("ValidateHit")
 
--- Normal local variables for tracking toggle states (First two true by default)
+-- Normal local variables for tracking toggle states
 local AutoLockBase = true
 local AutoCollectMoney = true
 local KillAura = false
@@ -57,6 +57,44 @@ local function getClosestPlayerCharacter()
         end
     end
     return closestChar
+end
+
+-- Helper function to manage weapon equipping
+local function equipBestSword()
+    local char = localPlayer.Character
+    local backpack = localPlayer.Backpack
+    if not char or not backpack then return end
+
+    -- Check if a valid sword is already equipped in the character
+    for _, item in ipairs(char:GetChildren()) do
+        if item:IsA("Tool") and string.find(item.Name, "Sword") then
+            return -- Already holding a sword, do nothing
+        end
+    end
+
+    local woodenSword = nil
+    local targetSword = nil
+
+    -- Search backpack for the best option
+    for _, tool in ipairs(backpack:GetChildren()) do
+        if tool:IsA("Tool") then
+            if tool.Name == "WoodenSword" then
+                woodenSword = tool
+            elseif string.find(tool.Name, "Sword") then
+                targetSword = tool
+                break -- Found a high-tier sword, stop searching
+            end
+        end
+    end
+
+    -- Determine which weapon to equip
+    local swordToEquip = targetSword or woodenSword
+    if swordToEquip then
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid:EquipTool(swordToEquip)
+        end
+    end
 end
 
 -- LOOP 1: Auto Lock Base (MAX SPEED)
@@ -105,6 +143,7 @@ task.spawn(function()
         if KillAura then
             local targetCharacter = getClosestPlayerCharacter()
             if targetCharacter then
+                equipBestSword() -- Attempt weapon handling right before validation attack
                 validateHitEvent:FireServer(targetCharacter)
             end
         end
