@@ -11,13 +11,17 @@ local rootPart = character:WaitForChild("HumanoidRootPart")
 -- Wait for the plots folder
 local plotsFolder = workspace:WaitForChild("Plots")
 
--- Find our plot by matching the Owner attribute
+-- Find our plot by matching the Owner attribute (Repeats smoothly until found)
 local myPlot = nil
-while #plotsFolder:GetChildren() < 8 do task.wait() end
-for _, plot in ipairs(plotsFolder:GetChildren()) do
-    if plot:GetAttribute("Owner") == localPlayer.UserId then
-        myPlot = plot
-        break
+while ScriptID == CurrentScriptID and not myPlot do
+    for _, plot in ipairs(plotsFolder:GetChildren()) do
+        if plot:GetAttribute("Owner") == localPlayer.UserId then
+            myPlot = plot
+            break
+        end
+    end
+    if not myPlot then
+        task.wait() -- Yields just enough to prevent the engine from freezing/lagging
     end
 end
 
@@ -29,10 +33,10 @@ local buttonsFolder = myPlot:WaitForChild("Buttons")
 -- Remote event for Kill Aura
 local validateHitEvent = game:GetService("ReplicatedStorage"):WaitForChild("Events"):WaitForChild("ValidateHit")
 
--- Normal local variables for tracking toggle states
+-- Normal local variables for tracking toggle states (All true by default)
 local AutoLockBase = true
 local AutoCollectMoney = true
-local KillAura = false
+local KillAura = true
 
 -- Helper function to find the closest player's character
 local function getClosestPlayerCharacter()
@@ -106,7 +110,7 @@ task.spawn(function()
         
         if AutoLockBase then
             firetouchinterest(zone, rootPart, 0)
-            firetouchinterest(zone, rootPart, 1)
+            firetouchinterest(zone, rootRoot, 1)
         end
     end
 end)
