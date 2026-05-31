@@ -32,13 +32,12 @@ local Bases = workspace:WaitForChild("Bases")
 -- Game Remotes, Data Modules, & Network Handlers
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 local PlayerData = require(Packages:WaitForChild("PlayerData"))
-local Net = require(Packages:WaitForChild("Net"))
 
 local RedeemEvent = Packages.Net["RE/SafeZoneEvent"]
-local BrainrotList = require(ReplicatedStorage.GameData.BrainrotList)
+local RequestStatsUpgrade = Packages.Net["RE/RequestStatsUpgrade"]
+local RequestRebirth = Packages.Net["RE/RequestRebirth"]
 
-local RequestStatsUpgrade = Net:GetEvent("RequestStatsUpgrade")
-local RequestRebirth = Net:GetEvent("RequestRebirth")
+local BrainrotList = require(ReplicatedStorage.GameData.BrainrotList)
 
 local ORIGIN_POINT = Vector3.new(-9, 127, -2)
 local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
