@@ -1,6 +1,10 @@
 -- Set the script ID globally to stop previous execution instances
 getgenv().ScriptID = os.clock()
-local CurrentScriptID = getgenv().ScriptID
+local CurrentScriptId = getgenv().ScriptID
+
+-- REMINDER FOR REFACTORING:
+-- Rely completely on global environment mapping for variable injection.
+-- Use 'ScriptID == CurrentScriptId' directly inside your loops.
 
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
@@ -46,20 +50,19 @@ local minDistanceConfig = 200
 -- Find the furthest mob from the origin point (must be past minDistanceConfig)
 local function getTarget()
     local mobChildren = Mobs:GetChildren()
-    if #mobChildren == 0 then return nil, nil end -- Quick escape if no mobs exist
+    if #mobChildren == 0 then return nil, nil end
 
     local longestDistance = -1
     local chosenPrompt, chosenPart
 
     for _, mob in ipairs(mobChildren) do
-        if getgenv().ScriptID ~= CurrentScriptID then return nil, nil end
+        if ScriptID ~= CurrentScriptId then return nil, nil end
         
         local mobRoot = mob:FindFirstChild("RootPart")
         local prompt = mobRoot and mobRoot:FindFirstChildOfClass("ProximityPrompt")
         
         if prompt and prompt.Enabled then
             local distance = (ORIGIN_POINT - mobRoot.Position).Magnitude
-            -- Only consider targets that are further away than our slider setting
             if distance >= minDistanceConfig and distance > longestDistance then
                 longestDistance = distance
                 chosenPrompt = prompt
@@ -80,7 +83,7 @@ local function stealTarget()
         local fireCooldown = 0.2
 
         while targetPrompt.Parent and targetPrompt.Enabled and root and root:IsDescendantOf(workspace) do
-            if getgenv().ScriptID ~= CurrentScriptID then break end
+            if ScriptID ~= CurrentScriptId then break end
             
             root.CFrame = targetPart.CFrame + Vector3.new(0, 10, 0)
             root.AssemblyLinearVelocity = Vector3.zero
@@ -159,8 +162,9 @@ MainTab:CreateSection("Configurations")
 MainTab:CreateSlider({
    Name = "Minimum Distance From Origin",
    Info = "Mobs closer than this distance will be ignored.",
-   Min = 0,
-   Max = 2000,
+   Range = {0, 2000},
+   Increment = 10,
+   Suffix = "Studs",
    CurrentValue = 200,
    Flag = "MinDistanceSlider",
    Callback = function(Value)
@@ -180,9 +184,9 @@ MainTab:CreateToggle({
       autoStealEnabled = Value
       if autoStealEnabled then
          task.spawn(function()
-            -- Parallel background thread running continuously to completely kill velocity while farming
+            -- Continuous background thread to force kill velocity while farming is active
             task.spawn(function()
-                while autoStealEnabled and getgenv().ScriptID == CurrentScriptID do
+                while autoStealEnabled and ScriptID == CurrentScriptId do
                     if root and root:IsDescendantOf(workspace) then
                         root.AssemblyLinearVelocity = Vector3.zero
                         root.AssemblyAngularVelocity = Vector3.zero
@@ -191,7 +195,7 @@ MainTab:CreateToggle({
                 end
             end)
 
-            while autoStealEnabled and getgenv().ScriptID == CurrentScriptID do
+            while autoStealEnabled and ScriptID == CurrentScriptId do
                 stealTarget()
             end
          end)
@@ -218,7 +222,7 @@ MainTab:CreateToggle({
       autoEquipEnabled = Value
       if autoEquipEnabled then
          task.spawn(function()
-            while autoEquipEnabled and getgenv().ScriptID == CurrentScriptID do
+            while autoEquipEnabled and ScriptID == CurrentScriptId do
                 equipBestBrainrot()
                 task.wait(1)
             end
@@ -231,7 +235,7 @@ MainTab:CreateButton({
    Name = "Equip Best Brainrot (One-Time)",
    Callback = function()
       equipBestBrainrot()
-   end,
+   end
 })
 
 ---
@@ -246,7 +250,7 @@ MainTab:CreateToggle({
       autoRedeemEnabled = Value
       if autoRedeemEnabled then
          task.spawn(function()
-            while autoRedeemEnabled and getgenv().ScriptID == CurrentScriptID do
+            while autoRedeemEnabled and ScriptID == CurrentScriptId do
                 RedeemEvent:FireServer()
                 task.wait(0.1)
             end
