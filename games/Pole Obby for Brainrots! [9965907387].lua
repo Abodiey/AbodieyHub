@@ -36,6 +36,7 @@ local PlayerData = require(Packages:WaitForChild("PlayerData"))
 local RedeemEvent = Packages.Net["RE/SafeZoneEvent"]
 local RequestStatsUpgrade = Packages.Net["RE/RequestStatsUpgrade"]
 local RequestRebirth = Packages.Net["RE/RequestRebirth"]
+local UpgradeBrainrotEvent = Packages.Net["RE/UpgradeBrainrot"]
 
 local BrainrotList = require(ReplicatedStorage.GameData.BrainrotList)
 
@@ -161,6 +162,47 @@ local function equipBestBrainrot()
     -- 3. Equip only if the best tool is not already being held
     if bestTool and not currentlyEquippedBest then
         humanoid:EquipTool(bestTool)
+    end
+end
+
+-- Simulates touch interest to instantly claim accrued income from base slots
+local function collectBaseMoney()
+    local myBase = getYourBase()
+    if not myBase then return end
+
+    local slotsFolder = myBase:FindFirstChild("Slots")
+    if not slotsFolder then return end
+
+    for _, slot in ipairs(slotsFolder:GetChildren()) do
+        if ScriptID ~= CurrentScriptId then break end
+        
+        local hitbox = slot:FindFirstChild("Hitbox")
+        if hitbox and hitbox:FindFirstChild("TouchInterest") and root and root:IsDescendantOf(workspace) then
+            firetouchinterest(root, hitbox, 0) -- Touch start
+            task.wait()
+            firetouchinterest(root, hitbox, 1) -- Touch end
+        end
+    end
+end
+
+-- Loops through base slots, extracts the numeric value from the name, and fires the upgrade remote
+local function upgradeAllSlots()
+    local myBase = getYourBase()
+    if not myBase then return end
+
+    local slotsFolder = myBase:FindFirstChild("Slots")
+    if not slotsFolder then return end
+
+    for _, slot in ipairs(slotsFolder:GetChildren()) do
+        if ScriptID ~= CurrentScriptId then break end
+        
+        -- Pull out digits from slot names like "Slot1" or "Slot_12" safely as numbers
+        local slotString = string.match(slot.Name, "%d+")
+        local slotNumber = slotString and tonumber(slotString)
+        
+        if slotNumber then
+            UpgradeBrainrotEvent:FireServer(slotNumber)
+        end
     end
 end
 
@@ -355,6 +397,8 @@ local autoEquipEnabled = false
 local autoPickupEnabled = false
 local autoPlaceEnabled = false
 local autoFixEnabled = false
+local autoCollectEnabled = false
+local autoUpgradeEnabled = false
 local autoRebirthEnabled = false
 local autoRedeemEnabled = false
 
@@ -428,7 +472,7 @@ MainTab:CreateToggle({
          task.spawn(function()
             while autoRebirthEnabled and ScriptID == CurrentScriptId do
                 executeRebirthProcess()
-                task.wait(1) -- Yield frequency spacing before auditing next rebirth cycle
+                task.wait(1)
             end
          end)
       end
@@ -446,6 +490,52 @@ MainTab:CreateButton({
 -- BASE MANAGEMENT SECTION
 ---
 MainTab:CreateSection("Base Management")
+
+MainTab:CreateToggle({
+   Name = "Loop Auto Collect Money",
+   CurrentValue = false,
+   Callback = function(Value)
+      autoCollectEnabled = Value
+      if autoCollectEnabled then
+         task.spawn(function()
+            while autoCollectEnabled and ScriptID == CurrentScriptId do
+                collectBaseMoney()
+                task.wait(0.5)
+            end
+         end)
+      end
+   end,
+})
+
+MainTab:CreateButton({
+   Name = "Collect Money Once (One-Time)",
+   Callback = function()
+      collectBaseMoney()
+   end,
+})
+
+MainTab:CreateToggle({
+   Name = "Loop Auto Upgrade Slots",
+   CurrentValue = false,
+   Callback = function(Value)
+      autoUpgradeEnabled = Value
+      if autoUpgradeEnabled then
+         task.spawn(function()
+            while autoUpgradeEnabled and ScriptID == CurrentScriptId do
+                upgradeAllSlots()
+                task.wait(1) -- Frequency delay between fully upgrading cycles
+            end
+         end)
+      end
+   end,
+})
+
+MainTab:CreateButton({
+   Name = "Upgrade Slots Once (One-Time)",
+   Callback = function()
+      upgradeAllSlots()
+   end,
+})
 
 MainTab:CreateToggle({
    Name = "Loop Pickup All Slots",
