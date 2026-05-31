@@ -27,10 +27,18 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer
 local Mobs = workspace:WaitForChild("Mobs")
+local Bases = workspace:WaitForChild("Bases")
 
--- Game Remotes & Data
-local RedeemEvent = ReplicatedStorage.Packages.Net["RE/SafeZoneEvent"]
+-- Game Remotes, Data Modules, & Network Handlers
+local Packages = ReplicatedStorage:WaitForChild("Packages")
+local PlayerData = require(Packages:WaitForChild("PlayerData"))
+local Net = require(Packages:WaitForChild("Net"))
+
+local RedeemEvent = Packages.Net["RE/SafeZoneEvent"]
 local BrainrotList = require(ReplicatedStorage.GameData.BrainrotList)
+
+local RequestStatsUpgrade = Net:GetEvent("RequestStatsUpgrade")
+local RequestRebirth = Net:GetEvent("RequestRebirth")
 
 local ORIGIN_POINT = Vector3.new(-9, 127, -2)
 local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
@@ -46,6 +54,17 @@ end)
 
 -- Global setting configuration
 local minDistanceConfig = 200
+
+-- Dynamically find the player's base based on OwnerID attribute
+local function getYourBase()
+    for _, v in ipairs(Bases:GetChildren()) do
+        local id = v:GetAttribute("OwnerID")
+        if id and id == LocalPlayer.UserId then
+            return v
+        end
+    end
+    return nil
+end
 
 -- Find the furthest mob from the origin point (must be past minDistanceConfig)
 local function getTarget()
@@ -146,12 +165,198 @@ local function equipBestBrainrot()
     end
 end
 
+-- Automatically cleans up visual and physics clutter on working slots
+local function fixBaseProblems()
+    local myBase = getYourBase()
+    if not myBase then return end
+
+    local slotsFolder = myBase:FindFirstChild("Slots")
+    if not slotsFolder then return end
+
+    for _, slot in ipairs(slotsFolder:GetChildren()) do
+        local active = slot:FindFirstChild("ActiveBrainrot")
+        if active then
+            -- Fix RootPart Transparency
+            local rootPart = active:FindFirstChild("RootPart")
+            if rootPart and rootPart:IsA("BasePart") then
+                if rootPart.Transparency ~= 1 then rootPart.Transparency = 1 end
+            end
+
+            -- Fix VfxInstance properties
+            local vfx = active:FindFirstChild("VfxInstance")
+            if vfx then
+                if vfx:IsA("BasePart") then
+                    if vfx.CanCollide ~= false then vfx.CanCollide = false end
+                    if vfx.Transparency ~= 1 then vfx.Transparency = 1 end
+                end
+                for _, desc in ipairs(vfx:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        if desc.CanCollide ~= false then desc.CanCollide = false end
+                        if desc.Transparency ~= 1 then desc.Transparency = 1 end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Client patch to unlock and visually restore hidden base structures
+local function unlockAllBaseSlots()
+    local myBase = getYourBase()
+    if not myBase then return end
+
+    local slotsFolder = myBase:FindFirstChild("Slots")
+    if not slotsFolder then return end
+
+    for _, slot in ipairs(slotsFolder:GetChildren()) do
+        local targets = {"Base", "Rim", "Collect"}
+        for _, name in ipairs(targets) do
+            local part = slot:FindFirstChild(name)
+            if part and part:IsA("BasePart") then
+                part.Transparency = 0
+                part.CanCollide = true
+            end
+        end
+
+        local basePart = slot:FindFirstChild("Base")
+        local prompt = basePart and basePart:FindFirstChild("PlacePrompt")
+        if prompt then
+            prompt.Enabled = true
+        end
+    end
+end
+
+-- Process picking up items from occupied base slots (Fixed lag loop)
+local function pickupAllFromBase()
+    if not root or not root:IsDescendantOf(workspace) then return end
+    
+    local myBase = getYourBase()
+    if not myBase then return end
+
+    local slotsFolder = myBase:FindFirstChild("Slots")
+    if not slotsFolder then return end
+
+    for _, slot in ipairs(slotsFolder:GetChildren()) do
+        if ScriptID ~= CurrentScriptId then break end
+        
+        if slot:FindFirstChild("ActiveBrainrot") then
+            local part = slot:FindFirstChild("Base")
+            local prompt = part and part:FindFirstChild("PlacePrompt")
+            
+            if prompt and root and root:IsDescendantOf(workspace) then
+                root.CFrame = CFrame.new(part.Position + Vector3.new(0, 3, 0)) * root.CFrame.Rotation
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+                
+                -- Paced prompt activation loop to prevent frame dropping
+                while slot:FindFirstChild("ActiveBrainrot") and root and root:IsDescendantOf(workspace) do
+                    if ScriptID ~= CurrentScriptId then break end
+                    fireproximityprompt(prompt)
+                    task.wait(0.2)
+                end
+                task.wait(0.3)
+            end
+        end
+    end
+end
+
+-- Process placing items into empty base slots (Fixed lag loop)
+local function placeAllIntoBase()
+    if not root or not root:IsDescendantOf(workspace) then return end
+    
+    local myBase = getYourBase()
+    if not myBase then return end
+
+    local slotsFolder = myBase:FindFirstChild("Slots")
+    if not slotsFolder then return end
+
+    for _, slot in ipairs(slotsFolder:GetChildren()) do
+        if ScriptID ~= CurrentScriptId then break end
+        
+        if not slot:FindFirstChild("ActiveBrainrot") then
+            local part = slot:FindFirstChild("Base")
+            local prompt = part and part:FindFirstChild("PlacePrompt")
+            
+            if prompt and root and root:IsDescendantOf(workspace) then
+                root.CFrame = CFrame.new(part.Position + Vector3.new(0, 3, 0)) * root.CFrame.Rotation
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+                
+                -- Paced prompt activation loop to prevent frame dropping
+                while not slot:FindFirstChild("ActiveBrainrot") and root and root:IsDescendantOf(workspace) do
+                    if ScriptID ~= CurrentScriptId then break end
+                    fireproximityprompt(prompt)
+                    task.wait(0.2)
+                end
+                task.wait(0.3)
+            end
+        end
+    end
+end
+
+-- Logic processor for running the rebirth operations
+local function executeRebirthProcess()
+    local Data = PlayerData.GetData()
+    if not Data then return end
+
+    local Boost = LocalPlayer:GetAttribute("Boost")
+    if typeof(Boost) ~= "number" then
+        Boost = typeof(Data.Boost) == "number" and Data.Boost or 1
+    end
+
+    local MaxBoostCapacity = 40 + (Data.Rebirth or 0) * 10
+
+    -- Perform the stats upgrading sequence
+    while Boost < MaxBoostCapacity do
+        if ScriptID ~= CurrentScriptId then return end
+        
+        local UpgradeAmount = (MaxBoostCapacity - Boost >= 5) and 5 or 1
+        RequestStatsUpgrade:FireServer("Boost", UpgradeAmount)
+        
+        -- Safely wait for attribute response with a lifecycle script check backup
+        local changedSignal = LocalPlayer:GetAttributeChangedSignal("Boost")
+        local updated = false
+        local connection
+        
+        connection = changedSignal:Connect(function()
+            updated = true
+            connection:Disconnect()
+        end)
+        
+        -- Yield processing slightly to let backend respond or break if script refreshed
+        while not updated do
+            if ScriptID ~= CurrentScriptId then
+                if connection then connection:Disconnect() end
+                return
+            end
+            RunService.Heartbeat:Wait()
+        end
+        
+        local CurrentAttribute = LocalPlayer:GetAttribute("Boost")
+        if typeof(CurrentAttribute) == "number" then
+            Boost = CurrentAttribute
+        else
+            break
+        end
+    end
+
+    -- Run rebirth remote call once target requirements are filled
+    if Boost >= MaxBoostCapacity then
+        RequestRebirth:FireServer()
+        task.wait(0.5) -- Cool down allowance for data state updating
+    end
+end
+
 -- Create a Single Tab for features
 local MainTab = Window:CreateTab("Main Features", 4483362458)
 
 -- State Variables for the toggles
 local autoStealEnabled = false
 local autoEquipEnabled = false
+local autoPickupEnabled = false
+local autoPlaceEnabled = false
+local autoFixEnabled = false
+local autoRebirthEnabled = false
 local autoRedeemEnabled = false
 
 ---
@@ -207,6 +412,108 @@ MainTab:CreateButton({
    Name = "Steal Next Mob (One-Time)",
    Callback = function()
       task.spawn(stealTarget)
+   end,
+})
+
+---
+-- REBIRTH SYSTEM SECTION
+---
+MainTab:CreateSection("Progression & Rebirth")
+
+MainTab:CreateToggle({
+   Name = "Loop Auto Upgrade & Rebirth",
+   CurrentValue = false,
+   Callback = function(Value)
+      autoRebirthEnabled = Value
+      if autoRebirthEnabled then
+         task.spawn(function()
+            while autoRebirthEnabled and ScriptID == CurrentScriptId do
+                executeRebirthProcess()
+                task.wait(1) -- Yield frequency spacing before auditing next rebirth cycle
+            end
+         end)
+      end
+   end,
+})
+
+MainTab:CreateButton({
+   Name = "Rebirth Once (One-Time Run)",
+   Callback = function()
+      task.spawn(executeRebirthProcess)
+   end,
+})
+
+---
+-- BASE MANAGEMENT SECTION
+---
+MainTab:CreateSection("Base Management")
+
+MainTab:CreateToggle({
+   Name = "Loop Pickup All Slots",
+   CurrentValue = false,
+   Callback = function(Value)
+      autoPickupEnabled = Value
+      if autoPickupEnabled then
+         task.spawn(function()
+            while autoPickupEnabled and ScriptID == CurrentScriptId do
+                pickupAllFromBase()
+                task.wait(0.5)
+            end
+         end)
+      end
+   end,
+})
+
+MainTab:CreateButton({
+   Name = "Pickup All Slots Once (One-Time)",
+   Callback = function()
+      task.spawn(pickupAllFromBase)
+   end,
+})
+
+MainTab:CreateToggle({
+   Name = "Loop Place Brainrot (Empty Slots)",
+   CurrentValue = false,
+   Callback = function(Value)
+      autoPlaceEnabled = Value
+      if autoPlaceEnabled then
+         task.spawn(function()
+            while autoPlaceEnabled and ScriptID == CurrentScriptId do
+                placeAllIntoBase()
+                task.wait(0.5)
+            end
+         end)
+      end
+   end,
+})
+
+MainTab:CreateButton({
+   Name = "Place Brainrot Once (One-Time)",
+   Callback = function()
+      task.spawn(placeAllIntoBase)
+   end,
+})
+
+MainTab:CreateToggle({
+   Name = "Auto Fix Clutter / Problems",
+   CurrentValue = false,
+   Callback = function(Value)
+      autoFixEnabled = Value
+      if autoFixEnabled then
+         task.spawn(function()
+            while autoFixEnabled and ScriptID == CurrentScriptId do
+                fixBaseProblems()
+                task.wait(0.5)
+            end
+         end)
+      end
+   end,
+})
+
+MainTab:CreateButton({
+   Name = "Unlock All Base Slots (Client Path)",
+   Callback = function()
+      unlockAllBaseSlots()
    end,
 })
 
