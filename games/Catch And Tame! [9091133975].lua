@@ -28,7 +28,7 @@ local ignoreBossPets = true
 local selectedIsland = nil
 
 local loopCooldownCount = 5
-local maxCaptureDistance = 65
+local maxCaptureDistance = 64 -- Set strictly below 65 to enforce the max cap rule safely
 local teleportWaitTime = 0.3
 
 -- Item Modifiers Default Settings
@@ -218,7 +218,7 @@ local islandConfigs = {
     ["SafariIsland"] = {
         Target = function()
             local qt = workspace:FindFirstChild("QuickTravel")
-            local safari = qt and qt:FindFirstChild("SafariIsland")
+            local safari = qt and qt:SafariIsland:FindFirstChild("Marker")
             return safari and safari:FindFirstChild("Marker")
         end,
         Boxes = function() return workspace:FindFirstChild("SafariIslandPets") and workspace.SafariIslandPets:FindFirstChild("SpawnBoxes") end,
@@ -298,10 +298,14 @@ local function findBestValidPet()
 
                         if not obj:GetAttribute("LuckyBlockLuck") then
                             if not permanentIgnore[obj] and obj ~= lastUsedPet and not dynamicBlacklist[obj] then
-                                local rpsValue = obj:GetAttribute("RPS") or 0
                                 local petPos = obj.PrimaryPart.Position
                                 local distance = (myPos - petPos).Magnitude
                                 
+                                -- Filter out any pet that is strictly greater than or equal to 65 studs away
+                                if distance >= 65 then
+                                    continue
+                                end
+
                                 if rpsValue > highestRPS then
                                     highestRPS = rpsValue
                                     shortestDistanceForHighestRPS = distance
@@ -349,6 +353,13 @@ local function startAutoFarmLoop()
             local rootPart = character and character:FindFirstChild("HumanoidRootPart")
             
             if rootPart and pet.PrimaryPart then
+                -- Performs absolute target distance check check one more time right before path-lock invocation
+                if (rootPart.Position - pet.PrimaryPart.Position).Magnitude >= 65 then
+                    activelyFarmingPet = nil
+                    task.wait(0.1)
+                    continue
+                end
+
                 if distance > maxCaptureDistance then
                     print("Target outside optimal range. Teleporting...")
                     rootPart.CFrame = CFrame.new(pet.PrimaryPart.Position)
@@ -687,8 +698,8 @@ MainTab:CreateToggle({
 
 MainTab:CreateSlider({
     Name = "Max Capture Range",
-    Range = {10, 250},
-    Increment = 5,
+    Range = {10, 64}, -- Slider bounds strictly capped below 65 to align with validation filter mechanics
+    Increment = 1,
     CurrentValue = maxCaptureDistance,
     Flag = "MaxCaptureRangeFlag",
     Callback = function(Value)
