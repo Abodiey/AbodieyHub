@@ -7,9 +7,25 @@ local Players = cloneref(game:GetService("Players"))
 local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
 local RunService = cloneref(game:GetService("RunService"))
 
+-- Config Requirements
+local strengthConfig = require(ReplicatedStorage:WaitForChild("Configs"):WaitForChild("Lassos"):WaitForChild("strengthConfig"))
+local DifficultyConfig = require(game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts"):WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("lassoUI"):WaitForChild("lassoMinigameUI"):WaitForChild("DifficultyConfig"))
+local petsindex = require(game:GetService("Players").LocalPlayer.PlayerScripts:WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("IndexMenu"))
+
+-- Create custom rarity weights mapping from module order
+local orderofpets = petsindex.RarityOrder
+local customOrder = table.clone(orderofpets)
+table.insert(customOrder, "Secret")
+
+local rarityWeights = {}
+for index, rarityName in ipairs(customOrder) do
+    rarityWeights[rarityName] = index
+end
+
 -- Remotes & Paths
 local minigameRequest = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("minigameRequest")
 local UpdateProgress = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("UpdateProgress")
+local CancelMinigame = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CancelMinigame")
 local collectAllPetCash = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("collectAllPetCash")
 local LocalPlayer = Players.LocalPlayer
 
@@ -24,109 +40,173 @@ local afkRewardsActive = true
 local antiAfkActive = true
 local autoCollectMoney = false
 local autoCollectFruits = false
-local ignoreBossPets = true
+local autoCollectFoodRain = false
+local autoCollectEasterEggs = false
+local autoUniversalCollect = false
+local autoTeleportToBoss = false
 local selectedIsland = nil
 
-local loopCooldownCount = 5
-local maxCaptureDistance = 64 -- Set strictly below 65 to enforce the max cap rule safely
-local teleportWaitTime = 0.3
+-- Filter Configs
+local targetSelectionMode = "All" -- Options: "All", "Bosses Only", "Lucky Blocks Only", "Non-Boss Pets Only"
+local ignoreNonMutated = false
 
--- Item Modifiers Default Settings
-local defaultSpeed = 60       -- Default speed for Fins
-local maxJetpackSpeed = 100   -- Custom biggest speed value for Jetpacks
+local minRpsThreshold = 0
+local minStrengthThreshold = 100
+local loopCooldownCount = 5
+local maxCaptureDistance = 45
+local teleportWaitTime = 0.3
+local maxCaptureTimeLimit = 10
+local interactionDelay = 0.2 
+
+-- Universal Collect Dynamic Variables
+local universalPreDelay = 0.1
+local universalPostDelay = 0.2
+
+-- Item Modifiers Settings
+local defaultSpeed = 60       
+local maxJetpackSpeed = 100   
+
+-- Suffix Parsing Map
+local suffixMultipliers = {
+    k = 1e3, m = 1e6, b = 1e9, t = 1e12
+}
+
+local function parseStringToNumber(text)
+    if not text or text == "" then return 0 end
+    text = string.lower(string.gsub(text, "%s+", ""))
+    local numericStr, suffix = string.match(text, "^([%d%.]+)([a-z]?)$")
+    if not numericStr then return 0 end
+    
+    local num = tonumber(numericStr) or 0
+    if suffix and suffixMultipliers[suffix] then
+        num = num * suffixMultipliers[suffix]
+    end
+    return num
+end
 
 -- Dynamic Folders Cache Tables
 local activePetsFolders = {}
 local activeFruitsFolders = {}
 
--- Tracking Cache Variables (With Weak Key Metatable Configuration for Garbage Collection Integrity)
+-- Tracking Cache Variables
 local lastUsedPet = nil
 local permanentIgnore = setmetatable({}, {__mode = "k"})
 local dynamicBlacklist = setmetatable({}, {__mode = "k"})
 local afkConnection = nil
 
--- Unified Garbage Collector Gear Upgrader Mod (Oxygen, Suits, Fins, Jetpacks)
+-- Modifiers scanning state tracker
+local foundOxygen = false
+local foundSuit = false
+local foundFins = false
+local foundJetpack = false
+
 local function applyGearModifications()
-    local oxygenKey1 = "Basic Tank"
-    local oxygenKey2 = "Normal Oxygen Tank"
-    local suitKey = "Basic Lava Suit"
-    local finsKey = "Yellow Fins"
-    local jetpackKey = "Starter Jetpack"
+    task.spawn(function()
+        local oxygenKey1 = "Basic Tank"
+        local oxygenKey2 = "Normal Oxygen Tank"
+        local suitKey = "Basic Lava Suit"
+        local finsKey = "Yellow Fins"
+        local jetpackKey = "Starter Jetpack"
 
-    local costStr = string.char(67, 111, 115, 116)          -- "Cost"
-    local oxygenStr = string.char(79, 120, 121, 103, 101, 110) -- "Oxygen"
-    local timeStr = string.char(84, 105, 109, 104)          -- "Time"
-    local speedStr = string.char(83, 112, 101, 101, 100)    -- "Speed"
+        local costStr = string.char(67, 111, 115, 116)          -- "Cost"
+        local oxygenStr = string.char(79, 120, 121, 103, 101, 110) -- "Oxygen"
+        local timeStr = string.char(84, 105, 109, 104)          -- "Time"
+        local speedStr = string.char(83, 112, 101, 101, 100)    -- "Speed"
 
-    local gc = getgc(true)
-    for i = 1, #gc do
-        local v = gc[i]
-        if type(v) == "table" then
+        while ScriptID == CurrentScriptID and not (foundOxygen and foundSuit and foundFins and foundJetpack) do
+            local gc = getgc(true)
+            local chunkCounter = 0
             
-            -- Oxygen Tanks
-            if rawget(v, oxygenKey1) or rawget(v, oxygenKey2) then
-                for _, data in pairs(v) do
-                    if type(data) == "table" then
-                        if rawget(data, costStr) ~= nil then rawset(data, costStr, 0) end
-                        if rawget(data, oxygenStr) ~= nil then rawset(data, oxygenStr, math.huge) end
-                    end
+            for i = 1, #gc do
+                if ScriptID ~= CurrentScriptID then return end
+                
+                chunkCounter = chunkCounter + 1
+                if chunkCounter % 2000 == 0 then
+                    task.wait()
                 end
-            end
-            
-            -- Lava Suits
-            if rawget(v, suitKey) then
-                for _, data in pairs(v) do
-                    if type(data) == "table" then
-                        if rawget(data, costStr) ~= nil then rawset(data, costStr, 0) end
-                        if rawget(data, timeStr) ~= nil then rawset(data, timeStr, math.huge) end
+                
+                local v = gc[i]
+                if type(v) == "table" then
+                    -- Oxygen Mod Lookup Check
+                    if not foundOxygen and (rawget(v, oxygenKey1) or rawget(v, oxygenKey2)) then
+                        for _, data in pairs(v) do
+                            if type(data) == "table" then
+                                if rawget(data, costStr) ~= nil then rawset(data, costStr, 0) end
+                                if rawget(data, oxygenStr) ~= nil then rawset(data, oxygenStr, math.huge) end
+                            end
+                        end
+                        foundOxygen = true
+                        if LocalPlayer then
+                            task.spawn(function()
+                                LocalPlayer:SetAttribute("equippedTank", "Basic Tank")
+                                task.wait()
+                                LocalPlayer:SetAttribute("equippedTank", "Fusion Tank")
+                            end)
+                        end
+                        print("[Mod GC] Oxygen Tank modifications locked successfully.")
                     end
-                end
-            end
+                    
+                    -- Lava Suit Mod Lookup Check
+                    if not foundSuit and rawget(v, suitKey) then
+                        for _, data in pairs(v) do
+                            if type(data) == "table" then
+                                if rawget(data, costStr) ~= nil then rawset(data, costStr, 0) end
+                                if rawget(data, timeStr) ~= nil then rawset(data, timeStr, math.huge) end
+                            end
+                        end
+                        foundSuit = true
+                        if LocalPlayer then
+                            task.spawn(function()
+                                LocalPlayer:SetAttribute("equippedSuit", "Basic Lava Suit")
+                                task.wait()
+                                LocalPlayer:SetAttribute("equippedSuit", "OP Lava Suit")
+                            end)
+                        end
+                        print("[Mod GC] Lava Suit modifications locked successfully.")
+                    end
 
-            -- Fins
-            if rawget(v, finsKey) then
-                for _, data in pairs(v) do
-                    if type(data) == "table" then
-                        if rawget(data, costStr) ~= nil then rawset(data, costStr, 0) end
-                        if rawget(data, speedStr) ~= nil then rawset(data, speedStr, defaultSpeed) end
+                    -- Fins Mod Lookup Check
+                    if not foundFins and rawget(v, finsKey) then
+                        for _, data in pairs(v) do
+                            if type(data) == "table" then
+                                if rawget(data, costStr) ~= nil then rawset(data, costStr, 0) end
+                                if rawget(data, speedStr) ~= nil then rawset(data, speedStr, defaultSpeed) end
+                            end
+                        end
+                        foundFins = true
+                        if LocalPlayer then
+                            task.spawn(function()
+                                LocalPlayer:SetAttribute("equippedFins", "Yellow Fins")
+                                task.wait()
+                                LocalPlayer:SetAttribute("equippedFins", "Abyss Fins")
+                            end)
+                        end
+                        print("[Mod GC] Fins modifications locked successfully.")
+                    end
+
+                    -- Jetpacks Mod Lookup Check
+                    if not foundJetpack and rawget(v, jetpackKey) then
+                        for _, data in pairs(v) do
+                            if type(data) == "table" then
+                                if rawget(data, costStr) ~= nil then rawset(data, costStr, 0) end
+                                if rawget(data, speedStr) ~= nil then rawset(data, speedStr, maxJetpackSpeed) end
+                            end
+                        end
+                        foundJetpack = true
+                        if LocalPlayer then
+                            task.spawn(function()
+                                LocalPlayer:SetAttribute("equippedJetpack", "Starter Jetpack")
+                                task.wait()
+                                LocalPlayer:SetAttribute("equippedJetpack", "OP Jetpack")
+                            end)
+                        end
+                        print("[Mod GC] Jetpack modifications locked successfully.")
                     end
                 end
             end
-
-            -- Jetpacks
-            if rawget(v, jetpackKey) then
-                for _, data in pairs(v) do
-                    if type(data) == "table" then
-                        if rawget(data, costStr) ~= nil then rawset(data, costStr, 0) end
-                        if rawget(data, speedStr) ~= nil then rawset(data, speedStr, maxJetpackSpeed) end
-                    end
-                end
-            end
-
+            task.wait(2) 
         end
-    end
-
-    -- Force updates equipped attributes instantly
-    if LocalPlayer then
-        task.spawn(function()
-            LocalPlayer:SetAttribute("equippedTank", "Basic Tank")
-            task.wait()
-            LocalPlayer:SetAttribute("equippedTank", "Fusion Tank")
-
-            LocalPlayer:SetAttribute("equippedSuit", "Basic Lava Suit")
-            task.wait()
-            LocalPlayer:SetAttribute("equippedSuit", "OP Lava Suit")
-
-            LocalPlayer:SetAttribute("equippedJetpack", "Starter Jetpack")
-            task.wait()
-            LocalPlayer:SetAttribute("equippedJetpack", "OP Jetpack")
-
-            LocalPlayer:SetAttribute("equippedFins", "Yellow Fins")
-            task.wait()
-            LocalPlayer:SetAttribute("equippedFins", "Abyss Fins")
-        end)
-    end
-    print("Gear modifiers and stat tables successfully upgraded.")
+    end)
 end
 applyGearModifications()
 
@@ -136,19 +216,16 @@ local function internalInitializeFolders()
     table.clear(activeFruitsFolders)
     
     for _, child in ipairs(workspace:GetChildren()) do
-        -- Cache Pet Folders
         local petsMatch = child:FindFirstChild("Pets")
         if petsMatch and petsMatch:IsA("Folder") then
             table.insert(activePetsFolders, petsMatch)
         end
         
-        -- Cache Fruit Folders
         local fruitsMatch = child:FindFirstChild("Fruits")
         if fruitsMatch and fruitsMatch:IsA("Folder") then
             table.insert(activeFruitsFolders, fruitsMatch)
         end
     end
-    print(string.format("Index Scanning Complete! Cached %d 'Pets' folders and %d 'Fruits' folders.", #activePetsFolders, #activeFruitsFolders))
 end
 internalInitializeFolders()
 
@@ -218,7 +295,7 @@ local islandConfigs = {
     ["SafariIsland"] = {
         Target = function()
             local qt = workspace:FindFirstChild("QuickTravel")
-            local safari = qt and qt:SafariIsland:FindFirstChild("Marker")
+            local safari = qt and qt:FindFirstChild("SafariIsland")
             return safari and safari:FindFirstChild("Marker")
         end,
         Boxes = function() return workspace:FindFirstChild("SafariIslandPets") and workspace.SafariIslandPets:FindFirstChild("SpawnBoxes") end,
@@ -279,11 +356,13 @@ local function findBestValidPet()
     
     local myPos = character.HumanoidRootPart.Position
     local bestPet = nil
-    local highestRPS = -math.huge
-    local shortestDistanceForHighestRPS = math.huge
+    
+    -- Comparison metrics trackers
+    local highestRps = -math.huge
+    local highestRarityWeight = -math.huge
+    local shortestDistance = math.huge
     local currentTime = os.time()
 
-    -- Multi-folder table parse iteration
     for _, folder in ipairs(activePetsFolders) do
         if folder.Parent then
             for _, obj in ipairs(folder:GetChildren()) do
@@ -291,38 +370,120 @@ local function findBestValidPet()
                     local lifetime = obj:GetAttribute("Lifetime")
                     if obj == activelyFarmingPet or (lifetime and lifetime >= currentTime) then
                         
-                        local rarity = obj:GetAttribute("Rarity")
-                        if ignoreBossPets and (not rarity or rarity == "Boss") then
+                        if permanentIgnore[obj] or obj == lastUsedPet or dynamicBlacklist[obj] then
                             continue
                         end
 
-                        if not obj:GetAttribute("LuckyBlockLuck") then
-                            if not permanentIgnore[obj] and obj ~= lastUsedPet and not dynamicBlacklist[obj] then
-                                local petPos = obj.PrimaryPart.Position
-                                local distance = (myPos - petPos).Magnitude
-                                
-                                -- Filter out any pet that is strictly greater than or equal to 65 studs away
-                                if distance >= 65 then
-                                    continue
-                                end
+                        -- Identify Classification using HasTag and Rarity Attribute
+                        local isLuckyBlock = obj:HasTag("LuckyBlock")
+                        local isBoss = (obj:GetAttribute("Rarity") == "Boss")
+                        local isNonBossPet = (not isBoss and not isLuckyBlock)
 
-                                if rpsValue > highestRPS then
-                                    highestRPS = rpsValue
-                                    shortestDistanceForHighestRPS = distance
-                                    bestPet = obj
-                                elseif rpsValue == highestRPS and distance < shortestDistanceForHighestRPS then
-                                    shortestDistanceForHighestRPS = distance
-                                    bestPet = obj
-                                end
+                        -- Target Mode Selection Verification Filter Check
+                        if targetSelectionMode == "Bosses Only" and not isBoss then continue end
+                        if targetSelectionMode == "Lucky Blocks Only" and not isLuckyBlock then continue end
+                        if targetSelectionMode == "Non-Boss Pets Only" and not isNonBossPet then continue end
+
+                        -- Mutation Check Filters
+                        if ignoreNonMutated then
+                            local mutation = obj:GetAttribute("Mutation")
+                            if not mutation or mutation == "None" then
+                                continue
                             end
                         end
+
+                        -- Threshold Validations (Always apply filters based on data values)
+                        local rpsValue = obj:GetAttribute("RPS") or 0
+                        local strengthValue = obj:GetAttribute("Strength") or 0
+                        if rpsValue < minRpsThreshold or strengthValue < minStrengthThreshold then
+                            continue
+                        end
+
+                        local distance = (myPos - obj.PrimaryPart.Position).Magnitude
+
+                        if isLuckyBlock then
+                            -- Sort by Rarity using weights extracted from IndexMenu configuration
+                            local rarityAttr = obj:GetAttribute("Rarity") or "Common"
+                            local rarityWeight = rarityWeights[rarityAttr] or 0
+                            
+                            -- Prioritize Lucky Blocks based on Rarity Weight, then shortest distance
+                            if not bestPet or not bestPet:HasTag("LuckyBlock") then
+                                highestRarityWeight = rarityWeight
+                                shortestDistance = distance
+                                bestPet = obj
+                            elseif rarityWeight > highestRarityWeight then
+                                highestRarityWeight = rarityWeight
+                                shortestDistance = distance
+                                bestPet = obj
+                            elseif rarityWeight == highestRarityWeight and distance < shortestDistance then
+                                shortestDistance = distance
+                                bestPet = obj
+                            end
+                        else
+                            -- Regular pets and bosses: Sort by higher RPS value primarily
+                            if not bestPet then
+                                highestRps = rpsValue
+                                shortestDistance = distance
+                                bestPet = obj
+                            -- If current candidate is a lucky block, standard pet immediately takes precedence if applicable, or handles pure RPS rank
+                            elseif bestPet:HasTag("LuckyBlock") then
+                                highestRps = rpsValue
+                                shortestDistance = distance
+                                bestPet = obj
+                            elseif rpsValue > highestRps then
+                                highestRps = rpsValue
+                                shortestDistance = distance
+                                bestPet = obj
+                            elseif rpsValue == highestRps and distance < shortestDistance then
+                                shortestDistance = distance
+                                bestPet = obj
+                            end
+                        end
+
                     end
                 end
             end
         end
     end
     
-    return bestPet, highestRPS, shortestDistanceForHighestRPS
+    return bestPet, (bestPet and (bestPet:GetAttribute("RPS") or bestPet:GetAttribute("Rarity")) or nil), shortestDistance
+end
+
+-- Dedicated Background Teleport Loop for Boss Tracking Independent Actions
+local function startBossTrackingTeleportLoop()
+    task.spawn(function()
+        print("[Service Hook] Background Boss Teleport Worker Started.")
+        while autoTeleportToBoss and ScriptID == CurrentScriptID do
+            local character = LocalPlayer.Character
+            local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+            
+            if rootPart then
+                local myPos = rootPart.Position
+                local closestBoss = nil
+                local shortestDistance = math.huge
+
+                for _, folder in ipairs(activePetsFolders) do
+                    if folder.Parent then
+                        for _, obj in ipairs(folder:GetChildren()) do
+                            if obj:IsA("Model") and obj.PrimaryPart and obj:GetAttribute("Captured") ~= true and obj:GetAttribute("Rarity") == "Boss" then
+                                local distance = (myPos - obj.PrimaryPart.Position).Magnitude
+                                if distance < shortestDistance then
+                                    shortestDistance = distance
+                                    closestBoss = obj
+                                end
+                            end
+                        end
+                    end
+                end
+
+                if closestBoss and closestBoss.PrimaryPart then
+                    rootPart.CFrame = CFrame.new(closestBoss.PrimaryPart.Position)
+                end
+            end
+            task.wait(0.1) 
+        end
+        print("[Service Hook] Background Boss Teleport Worker Halted.")
+    end)
 end
 
 -- Independent Self-Terminating Loop Function
@@ -333,17 +494,17 @@ local function startAutoFarmLoop()
             if not autoFarmActive then break end
             
             updateTrackingClocks()
-            local pet, rps, distance = findBestValidPet()
+            local pet, statValue, distance = findBestValidPet()
             
             if pet and distance ~= math.huge then
-                print(string.format("Current Best Target: %s | RPS: %s | Distance: %.1f studs", pet.Name, tostring(rps), distance))
+                print(string.format("Current Best Target: %s | Sorted By value: %s | Distance: %.1f studs", pet.Name, tostring(statValue), distance))
             end
             
             if not pet then
                 repeat
                     task.wait()
                     if not autoFarmActive or ScriptID ~= CurrentScriptID then return end
-                    pet, rps, distance = findBestValidPet()
+                    pet, statValue, distance = findBestValidPet()
                 until pet ~= nil
             end
             
@@ -353,15 +514,8 @@ local function startAutoFarmLoop()
             local rootPart = character and character:FindFirstChild("HumanoidRootPart")
             
             if rootPart and pet.PrimaryPart then
-                -- Performs absolute target distance check check one more time right before path-lock invocation
-                if (rootPart.Position - pet.PrimaryPart.Position).Magnitude >= 65 then
-                    activelyFarmingPet = nil
-                    task.wait(0.1)
-                    continue
-                end
-
-                if distance > maxCaptureDistance then
-                    print("Target outside optimal range. Teleporting...")
+                if distance > maxCaptureDistance and not autoTeleportToBoss then
+                    print(string.format("Target outside configured range (%.1f > %d). Teleporting to target location...", distance, maxCaptureDistance))
                     rootPart.CFrame = CFrame.new(pet.PrimaryPart.Position)
                     task.wait(teleportWaitTime)
                 end
@@ -386,6 +540,9 @@ local function startAutoFarmLoop()
                 print("Minigame entered successfully! Running progression...")
                 
                 local stickyConnection = nil
+                local captureStartTime = os.clock()
+                local sequenceTimedOut = false
+                local isBossPet = (pet:GetAttribute("Rarity") == "Boss")
                 
                 pcall(function()
                     stickyConnection = RunService.RenderStepped:Connect(function()
@@ -393,6 +550,7 @@ local function startAutoFarmLoop()
                             if stickyConnection then stickyConnection:Disconnect() end
                             return
                         end
+                        if autoTeleportToBoss then return end
                         
                         local currentCharacter = LocalPlayer.Character
                         local currentRoot = currentCharacter and currentCharacter:FindFirstChild("HumanoidRootPart")
@@ -402,21 +560,43 @@ local function startAutoFarmLoop()
                     end)
                 end)
                 
-                for percent = 0, 100, 5 do
-                    if ScriptID ~= CurrentScriptID then 
-                        if stickyConnection then stickyConnection:Disconnect() end
-                        activelyFarmingPet = nil
-                        return 
+                if isBossPet then
+                    print("[Farming Engine] Target identified as Boss. Firing progression fallback value: 1 (Timeout Ignored)")
+                    while pet.Parent and pet:GetAttribute("Captured") ~= true and ScriptID == CurrentScriptID do
+                        UpdateProgress:FireServer(1)
+                        task.wait()
                     end
-                    UpdateProgress:FireServer(percent)
-                    task.wait()
+                else
+                    -- Dynamic Dynamic Progress Per Click (PPP) Calculation Engine
+                    local lasso = LocalPlayer:GetAttribute("equippedLasso")
+                    local petStrength = pet:GetAttribute("Strength") or 1
+                    local difficulty = petStrength <= 14 and 1 or strengthConfig(lasso, petStrength)
+                    local ppp = 100 / DifficultyConfig.Settings[difficulty].clicksRequired.min
+                    
+                    local currentPercent = 0
+                    while pet.Parent and pet:GetAttribute("Captured") ~= true and ScriptID == CurrentScriptID do
+                        if (os.clock() - captureStartTime) >= maxCaptureTimeLimit then
+                            sequenceTimedOut = true
+                            warn(string.format("Minigame capture runtime exceeded threshold limit (%s seconds). Force cancellation sequence initiated.", tostring(maxCaptureTimeLimit)))
+                            pcall(function() CancelMinigame:FireServer() end)
+                            break
+                        end
+                        
+                        UpdateProgress:FireServer(currentPercent)
+                        
+                        -- Progress incremental tracking steps sequence logic
+                        if currentPercent < 100 then
+                            currentPercent = math.min(currentPercent + ppp, 100)
+                        end
+                        task.wait()
+                    end
                 end
                 
-                lastUsedPet = pet
-                print("Progress sequence complete. Waiting for target clearance...")
-                
-                while pet.Parent and pet:GetAttribute("Captured") ~= true and ScriptID == CurrentScriptID do
-                    task.wait()
+                if not sequenceTimedOut then
+                    lastUsedPet = pet
+                    print("Progress sequence complete.")
+                else
+                    dynamicBlacklist[pet] = loopCooldownCount
                 end
                 
                 if stickyConnection then
@@ -484,6 +664,142 @@ local function startAutoCollectFruits()
     end)
 end
 
+-- Independent Self-Terminating Loop Function for Auto Collect Food Rain Event
+local function startAutoCollectFoodRain()
+    task.spawn(function()
+        print("Auto Collect Food Rain Event Loop Started.")
+        while autoCollectFoodRain and ScriptID == CurrentScriptID do
+            local foodRainFolder = workspace:FindFirstChild("FoodRainEvent")
+            local spawnedFolder = foodRainFolder and foodRainFolder:FindFirstChild("Spawned")
+            
+            if spawnedFolder then
+                local descendants = spawnedFolder:GetDescendants()
+                for i = 1, #descendants do
+                    if not autoCollectFoodRain or ScriptID ~= CurrentScriptID then break end
+                    
+                    local prompt = descendants[i]
+                    if prompt:IsA("ProximityPrompt") and prompt.Parent and prompt.Enabled then
+                        local parentPart = prompt.Parent:IsA("BasePart") and prompt.Parent or prompt.Parent:FindFirstChildWhichIsA("BasePart")
+                        if parentPart then
+                            local character = LocalPlayer.Character
+                            local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+                            
+                            if rootPart then
+                                rootPart.CFrame = parentPart.CFrame
+                                task.wait(interactionDelay)
+                                
+                                if prompt.Parent and prompt.Enabled then
+                                    pcall(function()
+                                        fireproximityprompt(prompt)
+                                    end)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            task.wait(0.5)
+        end
+        print("Auto Collect Food Rain Loop Completely Terminated.")
+    end)
+end
+
+-- Independent Self-Terminating Loop Function for Auto Collect Easter Eggs
+local function startAutoCollectEasterEggs()
+    task.spawn(function()
+        print("Auto Collect Easter Eggs Loop Started.")
+        while autoCollectEasterEggs and ScriptID == CurrentScriptID do
+            local easterEggsFolder = workspace:FindFirstChild("EasterEggs")
+            
+            if easterEggsFolder then
+                local descendants = easterEggsFolder:GetDescendants()
+                for i = 1, #descendants do
+                    if not autoCollectEasterEggs or ScriptID ~= CurrentScriptID then break end
+                    
+                    local prompt = descendants[i]
+                    if prompt:IsA("ProximityPrompt") and prompt.Parent and prompt.Enabled then
+                        local parentPart = prompt.Parent:IsA("BasePart") and prompt.Parent or prompt.Parent:FindFirstChildWhichIsA("BasePart")
+                        if parentPart then
+                            local character = LocalPlayer.Character
+                            local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+                            
+                            if rootPart then
+                                rootPart.CFrame = parentPart.CFrame
+                                task.wait(interactionDelay)
+                                
+                                if prompt.Parent and prompt.Enabled then
+                                    pcall(function()
+                                        fireproximityprompt(prompt)
+                                    end)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            task.wait(0.5)
+        end
+        print("Auto Collect Easter Eggs Loop Completely Terminated.")
+    end)
+end
+
+-- Auto Universal Collect Loop (Excludes BeeHives, FoodRainEvent, and EasterEggs branches)
+local function startAutoUniversalCollect()
+    task.spawn(function()
+        print("Auto Universal Collect Loop Started.")
+        local beeHives = workspace:FindFirstChild("BeeHives")
+        local foodRain = workspace:FindFirstChild("FoodRainEvent")
+        local easterEggs = workspace:FindFirstChild("EasterEggs")
+        
+        while autoUniversalCollect and ScriptID == CurrentScriptID do
+            local descendants = workspace:GetDescendants()
+            
+            for i = 1, #descendants do
+                if not autoUniversalCollect or ScriptID ~= CurrentScriptID then break end
+                
+                local prompt = descendants[i]
+                if prompt:IsA("ProximityPrompt") and prompt.ActionText == "Collect" and prompt.Enabled then
+                    -- Hierarchy filter safety exclusions constraints mapping path verification
+                    if beeHives and prompt:IsDescendantOf(beeHives) then continue end
+                    if foodRain and prompt:IsDescendantOf(foodRain) then continue end
+                    if easterEggs and prompt:IsDescendantOf(easterEggs) then continue end
+                    
+                    local targetPosition = nil
+                    local firstPartAncestor = prompt:FindFirstAncestorWhichIsA("BasePart")
+                    
+                    if firstPartAncestor then
+                        targetPosition = firstPartAncestor.CFrame
+                    else
+                        local firstModelAncestor = prompt:FindFirstAncestorWhichIsA("Model")
+                        if firstModelAncestor then
+                            targetPosition = firstModelAncestor:GetPivot()
+                        end
+                    end
+                    
+                    if targetPosition then
+                        local character = LocalPlayer.Character
+                        local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+                        
+                        if rootPart then
+                            rootPart.CFrame = targetPosition
+                            task.wait(universalPreDelay)
+                            
+                            if prompt.Parent and prompt.Enabled then
+                                pcall(function()
+                                    fireproximityprompt(prompt)
+                                end)
+                            end
+                            task.wait(universalPostDelay)
+                        end
+                    end
+                end
+            end
+            task.wait(0.5)
+        end
+        print("Auto Universal Collect Loop Terminated.")
+    end)
+end
+
 -- Anti AFK Handler Execution
 local function startAntiAFK()
     local function handleAFKState()
@@ -545,7 +861,7 @@ local function executeAreaTeleport(islandName)
                 if typeof(targetSource) == "Vector3" then
                     targetCFrame = CFrame.new(targetSource)
                 elseif targetSource:IsA("UnreliableRemoteEvent") or not targetSource:IsA("Instance") then
-                    -- Safety catch-all for bad logic
+                    -- Safety catch-all
                 elseif targetSource:IsA("Model") then
                     targetCFrame = targetSource:GetPivot()
                 elseif targetSource:IsA("BasePart") then
@@ -591,6 +907,18 @@ MainTab:CreateToggle({
 })
 
 MainTab:CreateToggle({
+    Name = "Auto Universal Collect ('Collect')",
+    CurrentValue = autoUniversalCollect,
+    Flag = "AutoUniversalCollectToggle",
+    Callback = function(Value)
+        autoUniversalCollect = Value
+        if Value then
+            startAutoUniversalCollect()
+        end
+    end,
+})
+
+MainTab:CreateToggle({
     Name = "Auto Collect Fruits",
     CurrentValue = autoCollectFruits,
     Flag = "AutoCollectFruitsToggle",
@@ -598,6 +926,30 @@ MainTab:CreateToggle({
         autoCollectFruits = Value
         if Value then
             startAutoCollectFruits()
+        end
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Auto Collect Food Rain Event",
+    CurrentValue = autoCollectFoodRain,
+    Flag = "AutoCollectFoodRainToggle",
+    Callback = function(Value)
+        autoCollectFoodRain = Value
+        if Value then
+            startAutoCollectFoodRain()
+        end
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Auto Collect Easter Eggs",
+    CurrentValue = autoCollectEasterEggs,
+    Flag = "AutoCollectEasterEggsToggle",
+    Callback = function(Value)
+        autoCollectEasterEggs = Value
+        if Value then
+            startAutoCollectEasterEggs()
         end
     end,
 })
@@ -614,12 +966,34 @@ MainTab:CreateToggle({
     end,
 })
 
+MainTab:CreateToggle({
+    Name = "Auto Teleport to Closest Boss",
+    CurrentValue = autoTeleportToBoss,
+    Flag = "AutoTeleportToBossToggle",
+    Callback = function(Value)
+        autoTeleportToBoss = Value
+        if Value then
+            startBossTrackingTeleportLoop()
+        end
+    end,
+})
+
 MainTab:CreateButton({
     Name = "Collect Pet Cash (One-Time)",
     Callback = function()
         pcall(function()
             collectAllPetCash:FireServer()
         end)
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Force Cancel Minigame",
+    Callback = function()
+        pcall(function()
+            CancelMinigame:FireServer()
+        end)
+        print("Force cancel interaction hook fired to remote.")
     end,
 })
 
@@ -685,25 +1059,107 @@ MainTab:CreateButton({
     end,
 })
 
-MainTab:CreateSection("--- Configuration ---")
+MainTab:CreateSection("--- Targeting Filters & Modes ---")
+
+MainTab:CreateDropdown({
+    Name = "Farming Mode Filter Target",
+    Options = {"All", "Bosses Only", "Lucky Blocks Only", "Non-Boss Pets Only"},
+    CurrentOption = targetSelectionMode,
+    Flag = "FarmingModeFilterDropdown",
+    Callback = function(Value)
+        targetSelectionMode = type(Value) == "table" and Value[1] or Value
+        print("[Config System] Core farm selection mode changed to: " .. targetSelectionMode)
+    end
+})
 
 MainTab:CreateToggle({
-    Name = "Ignore Boss Pets",
-    CurrentValue = ignoreBossPets,
-    Flag = "IgnoreBossPetsToggle",
+    Name = "Ignore All Non-Mutated Pets",
+    CurrentValue = ignoreNonMutated,
+    Flag = "IgnoreNonMutatedToggleFlag",
     Callback = function(Value)
-        ignoreBossPets = Value
+        ignoreNonMutated = Value
+        print("[Config System] Filter ignore non-mutated parameter set to: " .. tostring(Value))
+    end
+})
+
+MainTab:CreateSection("--- Tuning Configurations ---")
+
+MainTab:CreateInput({
+    Name = "Minimum RPS Threshold",
+    PlaceholderText = "Ex: 1.5k, 50M, 2B...",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        minRpsThreshold = parseStringToNumber(Text)
+        print(string.format("[Config System] Filter minimum RPS metric updated: %d RPS", minRpsThreshold))
+    end,
+})
+
+MainTab:CreateInput({
+    Name = "Minimum Strength Threshold",
+    PlaceholderText = "Default: 100",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        minStrengthThreshold = parseStringToNumber(Text)
+        print(string.format("[Config System] Filter minimum Strength metric updated: %d Strength", minStrengthThreshold))
+    end,
+})
+
+MainTab:CreateInput({
+    Name = "Universal Pre-Delay (Teleport Wait)",
+    PlaceholderText = "Default: 0.1",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        local val = tonumber(Text)
+        if val then
+            universalPreDelay = val
+            print("[Config System] Universal pre-delay structural check timing adjusted: " .. tostring(val))
+        end
+    end,
+})
+
+MainTab:CreateInput({
+    Name = "Universal Post-Delay (Next Target Wait)",
+    PlaceholderText = "Default: 0.2",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        local val = tonumber(Text)
+        if val then
+            universalPostDelay = val
+            print("[Config System] Universal post-delay pacing evaluation interval modified: " .. tostring(val))
+        end
     end,
 })
 
 MainTab:CreateSlider({
-    Name = "Max Capture Range",
-    Range = {10, 64}, -- Slider bounds strictly capped below 65 to align with validation filter mechanics
+    Name = "Event Intercept Sync Delay",
+    Range = {0, 2},
+    Increment = 0.05,
+    CurrentValue = interactionDelay,
+    Flag = "EventInterceptSyncDelayFlag",
+    Callback = function(Value)
+        interactionDelay = Value
+    end,
+})
+
+MainTab:CreateSlider({
+    Name = "Max Capture Range (Teleport Threshold)",
+    Range = {10, 65},
     Increment = 1,
     CurrentValue = maxCaptureDistance,
     Flag = "MaxCaptureRangeFlag",
     Callback = function(Value)
         maxCaptureDistance = Value
+    end,
+})
+
+MainTab:CreateSlider({
+    Name = "Max Capture Time Limit (Seconds)",
+    Range = {2, 30},
+    Increment = 1,
+    CurrentValue = maxCaptureTimeLimit,
+    Flag = "MaxCaptureTimeLimitFlag",
+    Callback = function(Value)
+        maxCaptureTimeLimit = Value
     end,
 })
 
@@ -737,7 +1193,6 @@ MainTab:CreateSlider({
     Flag = "FinsSpeedModSlider",
     Callback = function(Value)
         defaultSpeed = Value
-        applyGearModifications()
     end,
 })
 
@@ -749,6 +1204,5 @@ MainTab:CreateSlider({
     Flag = "JetpackSpeedModSlider",
     Callback = function(Value)
         maxJetpackSpeed = Value
-        applyGearModifications()
     end,
 })
