@@ -8,7 +8,7 @@ local RunService = cloneref(game:GetService("RunService"))
 
 -- Config Requirements
 local strengthConfig = require(ReplicatedStorage:WaitForChild("Configs"):WaitForChild("Lassos"):WaitForChild("strengthConfig"))
-local DifficultyConfig = require(game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts"):WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("lassoUI"):WaitForChild("lassoMinigameUI"):Whitespace or game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts"):WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("lassoUI"):WaitForChild("lassoMinigameUI"):WaitForChild("DifficultyConfig"))
+local DifficultyConfig = require(game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts"):WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("lassoUI"):WaitForChild("lassoMinigameUI"):WaitForChild("DifficultyConfig"))
 local petsindex = require(game:GetService("Players").LocalPlayer.PlayerScripts:WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("IndexMenu"))
 
 -- Create custom rarity weights mapping from module order safely
