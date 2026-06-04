@@ -8,7 +8,10 @@ local RunService = cloneref(game:GetService("RunService"))
 
 -- Config Requirements
 local strengthConfig = require(ReplicatedStorage:WaitForChild("Configs"):WaitForChild("Lassos"):WaitForChild("strengthConfig"))
-local DifficultyConfig = require(game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts"):WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("lassoUI"):WaitForChild("lassoMinigameUI"):WaitForChild("DifficultyConfig"))
+
+local minigameUIFolder = game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts"):WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("lassoUI"):WaitForChild("lassoMinigameUI")
+local DifficultyConfig = require(minigameUIFolder:WaitForChild("DifficultyConfig"))
+
 local petsindex = require(game:GetService("Players").LocalPlayer.PlayerScripts:WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("IndexMenu"))
 
 -- Create custom rarity weights mapping from module order safely
@@ -108,50 +111,6 @@ local dataCycleDone = false
 local placeCycleDone = false
 local blockCycleDone = false
 local replaceCycleDone = false
-
--- Persistent Metatable Interception Engine (Using _G to prevent duplicate hook loops on execution)
-local function initiateNamecallInterception()
-    if _G.NamecallHooked then return end
-    _G.NamecallHooked = true
-    
-    local oldNamecall
-    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-        local method = getnamecallmethod()
-        
-        -- 1. GUARD CLAUSE: Immediately exit if it's not a server invocation
-        if method ~= "InvokeServer" then
-            setnamecallmethod(method)
-            return oldNamecall(self, ...)
-        end
-        
-        -- 2. GUARD CLAUSE: Immediately exit if it's not our target script or remote
-        if self ~= retrieveData or ScriptID ~= CurrentScriptID then
-            setnamecallmethod(method)
-            return oldNamecall(self, ...)
-        end
-        
-        -- 3. INTERCEPTION: Handle the target remote safely
-        setnamecallmethod(method)
-        local data = oldNamecall(self, ...)
-        
-        if type(data) ~= "table" then 
-            return data 
-        end
-        
-        local inventory = data.inventory
-        if inventory and inventory.pets then
-            cachedInventoryData = inventory.pets
-            lastDataFetchTime = os.clock()
-            dataCycleDone = false   
-            placeCycleDone = false  
-            blockCycleDone = false
-            replaceCycleDone = false
-        end
-        
-        return data
-    end)
-end
-initiateNamecallInterception()
 
 -- Suffix Parsing Map
 local suffixMultipliers = { k = 1e3, m = 1e6, b = 1e9, t = 1e12 }
@@ -606,7 +565,7 @@ local function startAutoLoopTeleportWorker()
         while autoLoopTeleport and ScriptID == CurrentScriptID do
             local currentTargetIsland = orderedIslandKeys[currentIndex]
             if currentTargetIsland then
-                executeAreaTeleport(currentTargetIsland)
+                executeAreaTeleport(currentIndex)
                 local islandArrivalTimestamp = os.clock()
                 
                 while autoLoopTeleport and ScriptID == CurrentScriptID do
@@ -909,7 +868,7 @@ local function pickupLowestRpsPlacedPetAction()
     end
 end
 
--- New Auto Pickup Worst Pet Action Loop Engine
+-- Auto Pickup Worst Pet Action Loop Engine
 local function startAutoPickupWorstPetLoop()
     task.spawn(function()
         while autoPickupWorstPet and ScriptID == CurrentScriptID do
@@ -1010,11 +969,10 @@ local function startAutoPlaceLuckyBlocksLoop()
     end)
 end
 
--- Completely Clearer, Optimized Auto Replace Routine (Runs accurately every 30 seconds)
+-- Clearer, Optimized Auto Replace Routine (Runs accurately every 30 seconds)
 local function startAutoReplaceWorstWithBestLoop()
     task.spawn(function()
         while autoReplaceWorstWithBest and ScriptID == CurrentScriptID do
-            -- Force an inventory sync immediately at the top of the 30s cycle
             updateInventoryCache(true)
             
             if cachedInventoryData then
@@ -1054,10 +1012,9 @@ local function startAutoReplaceWorstWithBestLoop()
                                 if rpsAttr < lowestPlacedRPS then
                                     lowestPlacedRPS = rpsAttr
                                     worstPlacedPetModel = pModel
-                               end
+                                end
                             end
                             
-                            -- Swap out if inventory counterpart yields strictly higher return output
                             if worstPlacedPetModel and highestInventoryRPS > lowestPlacedRPS then
                                 local pickupSuccess = pcall(function()
                                     return pickupRequest:InvokeServer("Pet", worstPlacedPetModel.Name, worstPlacedPetModel)
@@ -1072,7 +1029,7 @@ local function startAutoReplaceWorstWithBestLoop()
                     end
                 end
             end
-            task.wait(30) -- Constant 30 seconds interval control assignment
+            task.wait(30)
         end
     end)
 end
@@ -1341,7 +1298,6 @@ MainTab:CreateDropdown({
     MultipleOptions = true,
     Flag = "RarityMultiFilterSelectionGrid",
     Callback = function(OptionsTable)
-        -- Clear filters out and establish current dynamic selection sets cleanly
         for key, _ in pairs(activeRarityFilters) do activeRarityFilters[key] = false end
         for _, selectedRarity in ipairs(OptionsTable) do
             activeRarityFilters[selectedRarity] = true
