@@ -1,4 +1,3 @@
--- REMINDER: Never use the getgenv prefix anywhere else in the script after setting getgenv().ScriptID once at the top. Use ScriptID == CurrentScriptID for all loop and event checks.
 getgenv().ScriptID = os.clock()
 local CurrentScriptID = ScriptID
 
@@ -9,24 +8,18 @@ local RunService = cloneref(game:GetService("RunService"))
 
 -- Config Requirements
 local strengthConfig = require(ReplicatedStorage:WaitForChild("Configs"):WaitForChild("Lassos"):WaitForChild("strengthConfig"))
-local DifficultyConfig = require(game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts"):WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("lassoUI"):WaitForChild("lassoMinigameUI"):WaitForChild("DifficultyConfig"))
+local DifficultyConfig = require(game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts"):WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("lassoUI"):WaitForChild("lassoMinigameUI"):Whitespace or game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts"):WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("lassoUI"):WaitForChild("lassoMinigameUI"):WaitForChild("DifficultyConfig"))
 local petsindex = require(game:GetService("Players").LocalPlayer.PlayerScripts:WaitForChild("Controllers"):WaitForChild("UI"):WaitForChild("IndexMenu"))
 
 -- Create custom rarity weights mapping from module order safely
 local orderofpets = petsindex.RarityOrder
 local rarityWeights = {}
-local activeRarityFilters = {} -- Optimization: Tracks which rarities are allowed to be farmed
-
 if orderofpets then
     for index, rarityName in ipairs(orderofpets) do
         rarityWeights[rarityName] = index
-        activeRarityFilters[rarityName] = true -- All enabled by default
     end
 end
 rarityWeights["Secret"] = #orderofpets + 1
-activeRarityFilters["Secret"] = true
-rarityWeights["Boss"] = #orderofpets + 2
-activeRarityFilters["Boss"] = true
 
 -- Remotes & Paths
 local minigameRequest = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("minigameRequest")
@@ -69,13 +62,25 @@ local autoSellWorstPet = false
 local autoPlaceBestPets = false
 local autoPlaceLuckyBlocks = false
 local autoReplaceWorstWithBest = false
-local autoPickupWorstPetOnMax = false
+local autoPickupWorstPet = false
 local autoLoopTeleport = false
 local selectedIsland = nil
 
 -- Filter Configs
 local targetSelectionMode = "All" 
 local ignoreNonMutated = false
+
+-- Dynamic Rarity Multi-Filter Settings (True = Farm it, False = Skip it)
+local activeRarityFilters = {
+    ["Common"] = true,
+    ["Uncommon"] = true,
+    ["Rare"] = true,
+    ["Epic"] = true,
+    ["Legendary"] = true,
+    ["Mythical"] = true,
+    ["Secret"] = true,
+    ["Boss"] = true
+}
 
 local minRpsThreshold = 0
 local minStrengthThreshold = 100
@@ -85,7 +90,6 @@ local teleportWaitTime = 0.3
 local maxCaptureTimeLimit = 10
 local interactionDelay = 0.2 
 local sellRpsThreshold = 50
-local replaceRpsMargin = 1 -- Minimum RPS improvement required to replace a pet
 
 -- Auto Loop Teleport Configurations
 local loopTeleportInterval = 20
@@ -96,24 +100,20 @@ local universalPreDelay = 0.1
 local universalPostDelay = 0.2
 
 -- Inventory Caching & Cycle Controls
--- Changed from 300 seconds (5 mins) to 30 seconds
 local cachedInventoryData = nil
 local lastDataFetchTime = 0
-local cacheDurationLimit = 30 
+local cacheDurationLimit = 300 
 
 local dataCycleDone = false
 local placeCycleDone = false
 local blockCycleDone = false
 local replaceCycleDone = false
-local pickupCycleDone = false
 
--- Metatable Namecall Interception Engine with Re-execution Preservation Protection
+-- Persistent Metatable Interception Engine (Using _G to prevent duplicate hook loops on execution)
 local function initiateNamecallInterception()
-    if _G.NamecallHooked then 
-        return 
-    end
+    if _G.NamecallHooked then return end
     _G.NamecallHooked = true
-
+    
     local oldNamecall
     oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
@@ -124,8 +124,8 @@ local function initiateNamecallInterception()
             return oldNamecall(self, ...)
         end
         
-        -- 2. GUARD CLAUSE: Keep the hook active globally, but reference the latest script runtime configuration
-        if self ~= retrieveData or getgenv().ScriptID == nil then
+        -- 2. GUARD CLAUSE: Immediately exit if it's not our target script or remote
+        if self ~= retrieveData or ScriptID ~= CurrentScriptID then
             setnamecallmethod(method)
             return oldNamecall(self, ...)
         end
@@ -146,7 +146,6 @@ local function initiateNamecallInterception()
             placeCycleDone = false  
             blockCycleDone = false
             replaceCycleDone = false
-            pickupCycleDone = false
         end
         
         return data
@@ -268,9 +267,7 @@ local function applyGearModifications()
 end
 applyGearModifications()
 
--- Island Data Setup
--- Decreased WaterIsland required boxes by 2 (9 -> 7)
--- Changed WaterIsland Y offset target from -150 to -200
+-- Island Data Setup (WaterIsland spawnboxes required reduced by 2 to 7)
 local islandConfigs = {
     ["Roaming"] = { Target = function() local floor = workspace:FindFirstChild("LOCKED_FLOOR") return floor and (floor:GetPivot().Position + Vector3.new(0, 15, 0)) end, Boxes = function() return workspace:FindFirstChild("RoamingPets") and workspace.RoamingPets:FindFirstChild("SpawnBoxes") end, Required = 1 },
     ["VolcanoIsland"] = { Target = function() local qt = workspace:FindFirstChild("QuickTravel") local volcano = qt and qt:FindFirstChild("VolcanoIsland") return volcano and volcano:FindFirstChild("Marker") end, Boxes = function() return workspace:FindFirstChild("VolcanoIslandPets") and workspace.VolcanoIslandPets:FindFirstChild("SpawnBoxes") end, Required = 13 },
@@ -337,10 +334,10 @@ local function findBestValidPet()
                         if targetSelectionMode == "Lucky Blocks Only" and not isLuckyBlock then continue end
                         if targetSelectionMode == "Non-Boss Pets Only" and not isNonBossPet then continue end
 
-                        -- NEW: Rarity Check Dropdown Configuration Filters
-                        local petRarityAttr = obj:GetAttribute("Rarity") or "Common"
-                        if activeRarityFilters[petRarityAttr] == false then 
-                            continue 
+                        -- Multi-Rarity Checked Dropdown Filtration Safeguard
+                        local petRarityString = obj:GetAttribute("Rarity") or "Common"
+                        if activeRarityFilters[petRarityString] == false then
+                            continue
                         end
 
                         if ignoreNonMutated then
@@ -422,7 +419,7 @@ local function startBossTrackingTeleportLoop()
                         for j = 1, #children do
                             local obj = children[j]
                             if obj:IsA("Model") and obj.PrimaryPart and obj:GetAttribute("Captured") ~= true and obj:GetAttribute("Rarity") == "Boss" then
-                                -- NEW: Respect the active rarity filter dropdown configuration here too
+                                -- Check explicitly if boss rarity filter is completely bypassed
                                 if activeRarityFilters["Boss"] == false then continue end
                                 
                                 local distance = (myPos - obj.PrimaryPart.Position).Magnitude
@@ -587,7 +584,7 @@ local function executeAreaTeleport(islandName)
             end
             
             if targetCFrame then
-                -- Modified: Changed Y structural offset calculation from -150 to -200
+                -- Increased from -150 to -200 Y Offset cleanly for WaterIsland configuration
                 if islandName == "WaterIsland" then
                     targetCFrame = targetCFrame * CFrame.new(0, -200, 0)
                 end
@@ -609,7 +606,7 @@ local function startAutoLoopTeleportWorker()
         while autoLoopTeleport and ScriptID == CurrentScriptID do
             local currentTargetIsland = orderedIslandKeys[currentIndex]
             if currentTargetIsland then
-                executeAreaTeleport(currentIndex)
+                executeAreaTeleport(currentTargetIsland)
                 local islandArrivalTimestamp = os.clock()
                 
                 while autoLoopTeleport and ScriptID == CurrentScriptID do
@@ -767,7 +764,6 @@ local function updateInventoryCache(forceRefresh)
             placeCycleDone = false  
             blockCycleDone = false
             replaceCycleDone = false
-            pickupCycleDone = false
             return true
         end
         return false
@@ -816,9 +812,9 @@ local function startAutoSellWorstPetLoop()
         while autoSellWorstPet and ScriptID == CurrentScriptID do
             local executedSale = sellWorstPetAction(true)
             if dataCycleDone then
-                task.wait(1)
+                task.wait(5)
             elseif not executedSale then
-                task.wait(1)
+                task.wait(2)
             else
                 task.wait(0.3)
             end
@@ -869,12 +865,59 @@ local function startAutoPlaceBestPetsLoop()
         while autoPlaceBestPets and ScriptID == CurrentScriptID do
             local executedPlacement = placeBestPetAction(true)
             if placeCycleDone then
-                task.wait(1)
+                task.wait(5)
             elseif not executedPlacement then
-                task.wait(1)
+                task.wait(2)
             else
                 task.wait(0.3)
             end
+        end
+    end)
+end
+
+local function pickupLowestRpsPlacedPetAction()
+    local pensFolder = workspace:FindFirstChild("PlayerPens")
+    if not pensFolder then return end
+    
+    local targetPen = nil
+    for _, pen in ipairs(pensFolder:GetChildren()) do
+        if pen:GetAttribute("Owner") == LocalPlayer.Name then
+            targetPen = pen
+            break
+        end
+    end
+    
+    if targetPen and targetPen:FindFirstChild("Pets") then
+        local petsPlaced = targetPen.Pets:GetChildren()
+        if #petsPlaced == 0 then return end
+        
+        local lowestRPS = math.huge
+        local targetPetModel = nil
+        
+        for i = 1, #petsPlaced do
+            local pModel = petsPlaced[i]
+            local rpsAttr = pModel:GetAttribute("RPS") or 0
+            if rpsAttr < lowestRPS then
+                lowestRPS = rpsAttr
+                targetPetModel = pModel
+            end
+        end
+        
+        if targetPetModel then
+            pcall(function() pickupRequest:InvokeServer("Pet", targetPetModel.Name, targetPetModel) end)
+        end
+    end
+end
+
+-- New Auto Pickup Worst Pet Action Loop Engine
+local function startAutoPickupWorstPetLoop()
+    task.spawn(function()
+        while autoPickupWorstPet and ScriptID == CurrentScriptID do
+            local canPlaceSuccess, canPlace = pcall(function() return getMaxPetsForPlayer:InvokeServer() end)
+            if canPlaceSuccess and canPlace == false then
+                pickupLowestRpsPlacedPetAction()
+            end
+            task.wait(1.5)
         end
     end)
 end
@@ -909,7 +952,6 @@ local function placeLuckyBlockAction(isAutomatedCall)
         if success then
             pets[bestBlockUUID] = nil
             
-            -- Seamless Auto-Open Integration for the placed block
             task.spawn(function()
                 local playerPens = workspace:FindFirstChild("PlayerPens")
                 if not playerPens then return end
@@ -958,9 +1000,9 @@ local function startAutoPlaceLuckyBlocksLoop()
         while autoPlaceLuckyBlocks and ScriptID == CurrentScriptID do
             local executedPlacement = placeLuckyBlockAction(true)
             if blockCycleDone then
-                task.wait(1)
+                task.wait(3)
             elseif not executedPlacement then
-                task.wait(1)
+                task.wait(1.5)
             else
                 task.wait(0.4)
             end
@@ -968,168 +1010,69 @@ local function startAutoPlaceLuckyBlocksLoop()
     end)
 end
 
--- NEWLY REDESIGNED: Transparent, precise hot-swap tracking with clearer execution
-local function replaceWorstPetWithBestAction(isAutomatedCall)
-    if replaceCycleDone and isAutomatedCall then return false end
-    if not updateInventoryCache(false) or not cachedInventoryData then return false end
-
-    local petsInInventory = cachedInventoryData
-    local highestInventoryRPS = -math.huge
-    local bestUnplacedUUID = nil
-    
-    for uuid, pet in pairs(petsInInventory) do
-        if not string.find(pet.name, "Lucky Block") then
-            if pet.revPerSec > highestInventoryRPS then
-                highestInventoryRPS = pet.revPerSec
-                bestUnplacedUUID = uuid
-            end
-        end
-    end
-
-    if not bestUnplacedUUID then
-        if isAutomatedCall then replaceCycleDone = true end
-        return false
-    end
-
-    local pensFolder = workspace:FindFirstChild("PlayerPens")
-    if not pensFolder then return false end
-    
-    local targetPen = nil
-    local pens = pensFolder:GetChildren()
-    for i = 1, #pens do
-        if pens[i]:GetAttribute("Owner") == LocalPlayer.Name then
-            targetPen = pens[i]
-            break
-        end
-    end
-    
-    if targetPen and targetPen:FindFirstChild("Pets") then
-        local petsPlaced = targetPen.Pets:GetChildren()
-        if #petsPlaced == 0 then
-            if isAutomatedCall then replaceCycleDone = true end
-            return false
-        end
-        
-        local lowestPlacedRPS = math.huge
-        local worstPlacedPetModel = nil
-        
-        for i = 1, #petsPlaced do
-            local pModel = petsPlaced[i]
-            -- Only consider standard pets, ignore lucky block instances currently opening inside pen
-            if not pModel:HasTag("LuckyBlockReveal") then
-                local rpsAttr = pModel:GetAttribute("RPS") or 0
-                if rpsAttr < lowestPlacedRPS then
-                    lowestPlacedRPS = rpsAttr
-                    worstPlacedPetModel = pModel
-                end
-            end
-        end
-        
-        -- Clearly defined swap margin validation checks
-        if worstPlacedPetModel and (highestInventoryRPS - lowestPlacedRPS) >= replaceRpsMargin then
-            local pickupSuccess = pcall(function()
-                return pickupRequest:InvokeServer("Pet", worstPlacedPetModel.Name, worstPlacedPetModel)
-            end)
-            
-            if pickupSuccess then
-                task.wait(0.15) 
-                local placeSuccess = pcall(function() 
-                    RequestPlacePet:FireServer(bestUnplacedUUID, Vector3.zero, CFrame.new()) 
-                end)
-                if placeSuccess then
-                    petsInInventory[bestUnplacedUUID] = nil
-                    return true
-                end
-            end
-        else
-            if isAutomatedCall then replaceCycleDone = true end
-        end
-    end
-    return false
-end
-
+-- Completely Clearer, Optimized Auto Replace Routine (Runs accurately every 30 seconds)
 local function startAutoReplaceWorstWithBestLoop()
     task.spawn(function()
         while autoReplaceWorstWithBest and ScriptID == CurrentScriptID do
-            local executedReplacement = replaceWorstPetWithBestAction(true)
-            if replaceCycleDone then
-                task.wait(1)
-            elseif not executedReplacement then
-                task.wait(1)
-            else
-                task.wait(0.4)
-            end
-        end
-    end)
-end
-
--- NEW: Auto Pickup Worst Pet (Triggers only when slots are full)
-local function autoPickupWorstPetOnMaxAction(isAutomatedCall)
-    if pickupCycleDone and isAutomatedCall then return false end
-
-    -- Check if we are at maximum capacity
-    local canPlaceSuccess, canPlace = pcall(function() return getMaxPetsForPlayer:InvokeServer() end)
-    if not canPlaceSuccess then return false end
-    
-    -- If canPlace is true, we still have available pet slots. Do not pick anything up.
-    if canPlace == true then
-        if isAutomatedCall then pickupCycleDone = true end
-        return false
-    end
-
-    local pensFolder = workspace:FindFirstChild("PlayerPens")
-    if not pensFolder then return false end
-    
-    local targetPen = nil
-    for _, pen in ipairs(pensFolder:GetChildren()) do
-        if pen:GetAttribute("Owner") == LocalPlayer.Name then
-            targetPen = pen
-            break
-        end
-    end
-    
-    if targetPen and targetPen:FindFirstChild("Pets") then
-        local petsPlaced = targetPen.Pets:GetChildren()
-        if #petsPlaced == 0 then return false end
-        
-        local lowestRPS = math.huge
-        local worstPetModel = nil
-        
-        for i = 1, #petsPlaced do
-            local pModel = petsPlaced[i]
-            if not pModel:HasTag("LuckyBlockReveal") then
-                local rpsAttr = pModel:GetAttribute("RPS") or 0
-                if rpsAttr < lowestRPS then
-                    lowestRPS = rpsAttr
-                    worstPetModel = pModel
+            -- Force an inventory sync immediately at the top of the 30s cycle
+            updateInventoryCache(true)
+            
+            if cachedInventoryData then
+                local highestInventoryRPS = -math.huge
+                local bestUnplacedUUID = nil
+                
+                for uuid, pet in pairs(cachedInventoryData) do
+                    if not string.find(pet.name, "Lucky Block") then
+                        if pet.revPerSec > highestInventoryRPS then
+                            highestInventoryRPS = pet.revPerSec
+                            bestUnplacedUUID = uuid
+                        end
+                    end
+                end
+                
+                if bestUnplacedUUID then
+                    local pensFolder = workspace:FindFirstChild("PlayerPens")
+                    local targetPen = nil
+                    if pensFolder then
+                        for _, pen in ipairs(pensFolder:GetChildren()) do
+                            if pen:GetAttribute("Owner") == LocalPlayer.Name then
+                                targetPen = pen
+                                break
+                            end
+                        end
+                    end
+                    
+                    if targetPen and targetPen:FindFirstChild("Pets") then
+                        local petsPlaced = targetPen.Pets:GetChildren()
+                        if #petsPlaced > 0 then
+                            local lowestPlacedRPS = math.huge
+                            local worstPlacedPetModel = nil
+                            
+                            for i = 1, #petsPlaced do
+                                local pModel = petsPlaced[i]
+                                local rpsAttr = pModel:GetAttribute("RPS") or 0
+                                if rpsAttr < lowestPlacedRPS then
+                                    lowestPlacedRPS = rpsAttr
+                                    worstPlacedPetModel = pModel
+                               end
+                            end
+                            
+                            -- Swap out if inventory counterpart yields strictly higher return output
+                            if worstPlacedPetModel and highestInventoryRPS > lowestPlacedRPS then
+                                local pickupSuccess = pcall(function()
+                                    return pickupRequest:InvokeServer("Pet", worstPlacedPetModel.Name, worstPlacedPetModel)
+                                end)
+                                if pickupSuccess then
+                                    task.wait(0.15)
+                                    pcall(function() RequestPlacePet:FireServer(bestUnplacedUUID, Vector3.zero, CFrame.new()) end)
+                                    cachedInventoryData[bestUnplacedUUID] = nil
+                                end
+                            end
+                        end
+                    end
                 end
             end
-        end
-        
-        if worstPetModel then
-            local success = pcall(function() 
-                pickupRequest:InvokeServer("Pet", worstPetModel.Name, worstPetModel) 
-            end)
-            if success then
-                pickupCycleDone = false -- reset cycle flag to allow re-evaluation
-                return true
-            end
-        end
-    end
-    return false
-end
-
-local function startAutoPickupWorstPetLoop()
-    task.spawn(function()
-        while autoPickupWorstPetOnMax and ScriptID == CurrentScriptID do
-            local executedPickup = autoPickupWorstPetOnMaxAction(true)
-            if pickupCycleDone then
-                task.wait(1)
-            elseif not executedPickup then
-                task.wait(1)
-            else
-                task.wait(0.5)
-            end
+            task.wait(30) -- Constant 30 seconds interval control assignment
         end
     end)
 end
@@ -1151,40 +1094,6 @@ local function pickupAllMapPetsAction()
         for i = 1, #petsToCollect do
             local petObj = petsToCollect[i]
             pcall(function() pickupRequest:InvokeServer("Pet", petObj.Name, petObj) end)
-        end
-    end
-end
-
-local function pickupLowestRpsPlacedPetAction()
-    local pensFolder = workspace:FindFirstChild("PlayerPens")
-    if not pensFolder then return end
-    
-    local targetPen = nil
-    for _, pen in ipairs(pensFolder:GetChildren()) do
-        if pen:GetAttribute("Owner") == LocalPlayer.Name then
-            targetPen = pen
-            break
-        end
-    end
-    
-    if targetPen and targetPen:FindFirstChild("Pets") then
-        local petsPlaced = targetPen.Pets:GetChildren()
-        if #petsPlaced == 0 then return end
-        
-        local lowestRPS = math.huge
-        local targetPetModel = nil
-        
-        for i = 1, #petsPlaced do
-            local pModel = petsPlaced[i]
-            local rpsAttr = pModel:GetAttribute("RPS") or 0
-            if rpsAttr < lowestRPS then
-                lowestRPS = rpsAttr
-                targetPetModel = pModel
-            end
-        end
-        
-        if targetPetModel then
-            pcall(function() pickupRequest:InvokeServer("Pet", targetPetModel.Name, targetPetModel) end)
         end
     end
 end
@@ -1338,22 +1247,22 @@ MainTab:CreateToggle({
 })
 
 MainTab:CreateToggle({
-    Name = "Auto Replace Equipped (Hot-Swap)",
+    Name = "Auto Replace Worst Equipped (30s Cooldown)",
     CurrentValue = autoReplaceWorstWithBest,
     Flag = "AutoReplaceWorstWithBestToggleFlag",
     Callback = function(Value)
         autoReplaceWorstWithBest = Value
-        if Value then replaceCycleDone = false startAutoReplaceWorstWithBestLoop() end
+        if Value then startAutoReplaceWorstWithBestLoop() end
     end,
 })
 
 MainTab:CreateToggle({
-    Name = "Auto Pickup Worst Placed Pet (When Full)",
-    CurrentValue = autoPickupWorstPetOnMax,
-    Flag = "AutoPickupWorstPetOnMaxToggleFlag",
+    Name = "Auto Pickup Worst Pet (When Pen Maxed)",
+    CurrentValue = autoPickupWorstPet,
+    Flag = "AutoPickupWorstPetToggleFlag",
     Callback = function(Value)
-        autoPickupWorstPetOnMax = Value
-        if Value then pickupCycleDone = false startAutoPickupWorstPetLoop() end
+        autoPickupWorstPet = Value
+        if Value then startAutoPickupWorstPetLoop() end
     end,
 })
 
@@ -1395,10 +1304,8 @@ MainTab:CreateToggle({
 MainTab:CreateSection("--- Instant One-Time Actions ---")
 MainTab:CreateButton({ Name = "Sell Worst Pet", Callback = function() sellWorstPetAction(false) end })
 MainTab:CreateButton({ Name = "Place Best Pet", Callback = function() placeBestPetAction(false) end })
-MainTab:CreateButton({ Name = "Replace Worst Equipped", Callback = function() replaceWorstPetWithBestAction(false) end })
 MainTab:CreateButton({ Name = "Pickup Lowest Placed Pet", Callback = function() pickupLowestRpsPlacedPetAction() end })
 MainTab:CreateButton({ Name = "Pickup All Pen Pets", Callback = function() pickupAllMapPetsAction() end })
--- Removed: One-time single-invocation collect pet cash button assignment line block
 MainTab:CreateButton({ Name = "Force Cancel Minigame", Callback = function() pcall(function() CancelMinigame:FireServer() end) end })
 
 MainTab:CreateSection("--- Navigation ---")
@@ -1426,18 +1333,21 @@ MainTab:CreateDropdown({
     Callback = function(Value) targetSelectionMode = type(Value) == "table" and Value[1] or Value end
 })
 
--- NEW: Multi-Select Rarity Filtering Dropdown Strategy for Auto Farming Core Loop Execution
-local targetRarityOptionKeys = {"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythical", "Secret", "Boss"}
-for _, rarityName in ipairs(targetRarityOptionKeys) do
-    MainTab:CreateToggle({
-        Name = "Farm Rarity: " .. rarityName,
-        CurrentValue = true,
-        Flag = "TargetRarityFilterToggle_" .. rarityName,
-        Callback = function(Value)
-            activeRarityFilters[rarityName] = Value
-        end,
-    })
-end
+-- Multi-selection dropdown mapping configuration arrays for precise Rarity Control toggling
+MainTab:CreateDropdown({
+    Name = "Farm Target Rarity Filters",
+    Options = {"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythical", "Secret", "Boss"},
+    CurrentOption = {"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythical", "Secret", "Boss"},
+    MultipleOptions = true,
+    Flag = "RarityMultiFilterSelectionGrid",
+    Callback = function(OptionsTable)
+        -- Clear filters out and establish current dynamic selection sets cleanly
+        for key, _ in pairs(activeRarityFilters) do activeRarityFilters[key] = false end
+        for _, selectedRarity in ipairs(OptionsTable) do
+            activeRarityFilters[selectedRarity] = true
+        end
+    end
+})
 
 MainTab:CreateToggle({
     Name = "Ignore All Non-Mutated Pets",
@@ -1449,16 +1359,6 @@ MainTab:CreateToggle({
 MainTab:CreateSection("--- Tuning Configurations ---")
 MainTab:CreateSlider({ Name = "Loop Teleport Interval (Seconds)", Range = {5, 120}, Increment = 1, CurrentValue = loopTeleportInterval, Flag = "LoopTeleportIntervalSliderFlag", Callback = function(Value) loopTeleportInterval = Value end })
 MainTab:CreateSlider({ Name = "No Pet Found Timeout (Seconds)", Range = {2, 60}, Increment = 1, CurrentValue = noPetTimeoutLimit, Flag = "NoPetTimeoutLimitSliderFlag", Callback = function(Value) noPetTimeoutLimit = Value end })
-
-MainTab:CreateInput({
-    Name = "Auto Replace Improvement Margin (RPS)",
-    PlaceholderText = "Default minimum gain: 1",
-    RemoveTextAfterFocusLost = false,
-    Callback = function(Text)
-        local val = tonumber(Text)
-        if val then replaceRpsMargin = val replaceCycleDone = false end
-    end,
-})
 
 MainTab:CreateInput({
     Name = "Sell Pet Minimum RPS Threshold",
