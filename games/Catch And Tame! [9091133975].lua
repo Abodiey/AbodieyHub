@@ -27,12 +27,22 @@ local minigameRequest = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("
 local UpdateProgress = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("UpdateProgress")
 local CancelMinigame = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CancelMinigame")
 local collectAllPetCash = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("collectAllPetCash")
-local LocalPlayer = Players.LocalPlayer
+local retrieveData = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("retrieveData")
+local sellPet = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("sellPet")
+local removeTool = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("removeTool")
+local pickupRequest = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("pickupRequest")
+local RequestPlacePet = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("RequestPlacePet")
 
--- Knit AFK Remotes
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- Knit RF Services
 local AFKServiceFolder = ReplicatedStorage:WaitForChild("Packages"):WaitForChild("_Index"):WaitForChild("sleitnick_knit@1.7.0"):WaitForChild("knit"):WaitForChild("Services"):WaitForChild("AFKService"):WaitForChild("RF")
 local StartAFK = AFKServiceFolder:WaitForChild("StartAFK")
 local StopAFK = AFKServiceFolder:WaitForChild("StopAFK")
+
+local PenServiceFolder = ReplicatedStorage:WaitForChild("Packages"):WaitForChild("_Index"):WaitForChild("sleitnick_knit@1.7.0"):WaitForChild("knit"):WaitForChild("Services"):WaitForChild("PenService"):WaitForChild("RF")
+local getMaxPetsForPlayer = PenServiceFolder:WaitForChild("getMaxPetsForPlayer")
 
 -- State Toggles & Config Variables (No _G or shared)
 local autoFarmActive = false
@@ -44,6 +54,9 @@ local autoCollectFoodRain = false
 local autoCollectEasterEggs = false
 local autoUniversalCollect = false
 local autoTeleportToBoss = false
+local autoSellWorstPet = false
+local autoPlaceBestPets = false
+local autoPlaceLuckyBlocks = false
 local selectedIsland = nil
 
 -- Filter Configs
@@ -57,14 +70,47 @@ local maxCaptureDistance = 45
 local teleportWaitTime = 0.3
 local maxCaptureTimeLimit = 10
 local interactionDelay = 0.2 
+local sellRpsThreshold = 50
 
 -- Universal Collect Dynamic Variables
 local universalPreDelay = 0.1
 local universalPostDelay = 0.2
 
--- Item Modifiers Settings
-local defaultSpeed = 60       
-local maxJetpackSpeed = 100   
+-- Inventory Caching & Cycle Controls
+local cachedInventoryData = nil
+local lastDataFetchTime = 0
+local cacheDurationLimit = 300 -- 5 Minutes
+-- Booleans to prevent execution spam once criteria is exhausted
+local dataCycleDone = false
+local placeCycleDone = false
+local blockCycleDone = false
+
+-- Metatable Namecall Interception Engine for retrieveData Sync Cache
+local function initiateNamecallInterception()
+    local oldNamecall
+    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local method = getnamecallmethod()
+        local args = {...}
+        
+        if ScriptID == CurrentScriptID and self == retrieveData and (method == "InvokeServer" or method == "invokeServer") then
+            -- Let original invocation fire to capture the real data payload safely
+            local results = {oldNamecall(self, unpack(args))}
+            local data = results[1]
+            
+            if data and type(data) == "table" and data.inventory and data.inventory.pets then
+                cachedInventoryData = data.inventory.pets
+                lastDataFetchTime = os.clock()
+                dataCycleDone = false   -- Open loops up on a clean inventory update
+                placeCycleDone = false  -- Open loops up on a clean inventory update
+                blockCycleDone = false  -- Open loops up on a clean inventory update
+            end
+            return unpack(results)
+        end
+        
+        return oldNamecall(self, ...)
+    end)
+end
+initiateNamecallInterception()
 
 -- Suffix Parsing Map
 local suffixMultipliers = {
@@ -93,6 +139,7 @@ local lastUsedPet = nil
 local permanentIgnore = setmetatable({}, {__mode = "k"})
 local dynamicBlacklist = setmetatable({}, {__mode = "k"})
 local afkConnection = nil
+local afkScreenConnection = nil
 
 -- Modifiers scanning state tracker
 local foundOxygen = false
@@ -800,14 +847,368 @@ local function startAutoUniversalCollect()
     end)
 end
 
--- Anti AFK Handler Execution
+-- Unified Inventory Sync Fetcher (Cached via Metatable Interception)
+local function updateInventoryCache(forceRefresh)
+    local now = os.clock()
+    if forceRefresh or not cachedInventoryData or (now - lastDataFetchTime) >= cacheDurationLimit then
+        local success, data = pcall(function() return retrieveData:InvokeServer() end)
+        if success and data and data.inventory and data.inventory.pets then
+            cachedInventoryData = data.inventory.pets
+            lastDataFetchTime = now
+            dataCycleDone = false   
+            placeCycleDone = false  
+            blockCycleDone = false
+            return true
+        else
+            warn("Inventory data evaluation retrieval failed via remote proxy handshake.")
+            return false
+        end
+    end
+    return true
+end
+
+-- Inventory Management Utilities (Sell Worst Pet)
+local function sellWorstPetAction(isAutomatedCall)
+    if dataCycleDone and isAutomatedCall then
+        return false
+    end
+
+    if not updateInventoryCache(false) or not cachedInventoryData then
+        return false
+    end
+    
+    local pets = cachedInventoryData
+    local excludeKeyword = "Lucky Block"
+    
+    local lowestRPS = math.huge
+    local lowestPetUUID = nil
+    local lowestPetData = nil
+    
+    for uuid, pet in pairs(pets) do
+        local RPS = pet.revPerSec
+        local name = pet.name
+        
+        if not string.find(name, excludeKeyword) then
+            if RPS < lowestRPS then
+                lowestRPS = RPS
+                lowestPetUUID = uuid
+                lowestPetData = pet
+            end
+        end
+    end
+    
+    if lowestPetUUID and lowestPetData then
+        if lowestPetData.revPerSec < sellRpsThreshold then
+            print(string.format("[Inventory Engine] Lowest pet RPS (%.1f) below threshold (%d). Selling UUID: %s", lowestPetData.revPerSec, sellRpsThreshold, lowestPetUUID))
+            local sellSuccess = sellPet:InvokeServer(lowestPetUUID, false)
+            if sellSuccess then
+                removeTool:InvokeServer(lowestPetUUID)
+                pets[lowestPetUUID] = nil
+                print("Successfully sold and cleared inventory tool instance mapping for pet: " .. lowestPetData.name)
+                return true
+            else
+                warn("Server denied execution request to sell target pet.")
+            end
+        else
+            if not isAutomatedCall then
+                print(string.format("[Inventory Engine] Lowest pet RPS (%.1f) is above threshold limit (%d). Operations bypassed.", lowestPetData.revPerSec, sellRpsThreshold))
+            else
+                dataCycleDone = true 
+            end
+        end
+    else
+        if not isAutomatedCall then
+            print("[Inventory Engine] No valid pets found inside inventory tables parsing sequence.")
+        end
+    end
+    return false
+end
+
+local function startAutoSellWorstPetLoop()
+    task.spawn(function()
+        print("Auto Sell Worst Pet Engine Active.")
+        while autoSellWorstPet and ScriptID == CurrentScriptID do
+            local executedSale = sellWorstPetAction(true)
+            if dataCycleDone then
+                local remainingCacheTime = math.max(0, cacheDurationLimit - (os.clock() - lastDataFetchTime))
+                if remainingCacheTime > 0 then
+                    task.wait(math.min(remainingCacheTime, 5))
+                else
+                    updateInventoryCache(true)
+                end
+            elseif not executedSale then
+                task.wait(2)
+            else
+                task.wait(0.3)
+            end
+        end
+        print("Auto Sell Worst Pet Engine Deactivated.")
+    end)
+end
+
+-- Inventory Management Utilities (Auto Place Best Pets)
+local function placeBestPetAction(isAutomatedCall)
+    if placeCycleDone and isAutomatedCall then
+        return false
+    end
+
+    local canPlaceSuccess, canPlace = pcall(function() return getMaxPetsForPlayer:InvokeServer() end)
+    if not canPlaceSuccess or not canPlace then
+        if not isAutomatedCall then
+            warn("[Pen Service] Player placement limit checks failed or pen space is completely full.")
+        else
+            placeCycleDone = true 
+        end
+        return false
+    end
+
+    if not updateInventoryCache(false) or not cachedInventoryData then
+        return false
+    end
+
+    local pets = cachedInventoryData
+    local excludeKeyword = "Lucky Block"
+    
+    local highestRPS = -math.huge
+    local highestPetUUID = nil
+    local highestPetData = nil
+    
+    for uuid, pet in pairs(pets) do
+        local RPS = pet.revPerSec
+        local name = pet.name
+        
+        if not string.find(name, excludeKeyword) then
+            if RPS > highestRPS then
+                highestRPS = RPS
+                highestPetUUID = uuid
+                highestPetData = pet
+            end
+        end
+    end
+
+    if highestPetUUID and highestPetData then
+        print(string.format("[Placement Engine] Highest pet found: %s (RPS: %.1f). Placing into base pen...", highestPetData.name, highestPetData.revPerSec))
+        
+        local success = pcall(function()
+            RequestPlacePet:FireServer(highestPetUUID, Vector3.zero, CFrame.new())
+        end)
+        
+        if success then
+            pets[highestPetUUID] = nil
+            return true
+        end
+    else
+        if not isAutomatedCall then
+            print("[Placement Engine] No eligible pets detected in inventory caches.")
+        else
+            placeCycleDone = true 
+        end
+    end
+    return false
+end
+
+local function startAutoPlaceBestPetsLoop()
+    task.spawn(function()
+        print("Auto Place Best Pets Engine Active.")
+        while autoPlaceBestPets and ScriptID == CurrentScriptID do
+            local executedPlacement = placeBestPetAction(true)
+            if placeCycleDone then
+                local remainingCacheTime = math.max(0, cacheDurationLimit - (os.clock() - lastDataFetchTime))
+                if remainingCacheTime > 0 then
+                    task.wait(math.min(remainingCacheTime, 5))
+                else
+                    updateInventoryCache(true)
+                end
+            elseif not executedPlacement then
+                task.wait(2)
+            else
+                task.wait(0.3)
+            end
+        end
+        print("Auto Place Best Pets Engine Deactivated.")
+    end)
+end
+
+-- Inventory Management Utilities (Auto Place Lucky Blocks)
+local function placeLuckyBlockAction(isAutomatedCall)
+    if blockCycleDone and isAutomatedCall then
+        return false
+    end
+
+    local canPlaceSuccess, canPlace = pcall(function() return getMaxPetsForPlayer:InvokeServer() end)
+    if not canPlaceSuccess or not canPlace then
+        if not isAutomatedCall then
+            warn("[Pen Service] Player placement limit checks failed or pen space is completely full.")
+        else
+            blockCycleDone = true
+        end
+        return false
+    end
+
+    if not updateInventoryCache(false) or not cachedInventoryData then
+        return false
+    end
+
+    local pets = cachedInventoryData
+    local matchKeyword = "Lucky Block"
+    
+    local highestWeight = -math.huge
+    local bestBlockUUID = nil
+    local bestBlockData = nil
+    
+    for uuid, pet in pairs(pets) do
+        local name = pet.name
+        
+        if string.find(name, matchKeyword) then
+            local blockRarity = pet.Rarity or "Common"
+            local currentWeight = rarityWeights[blockRarity] or 0
+            
+            if currentWeight > highestWeight then
+                highestWeight = currentWeight
+                bestBlockUUID = uuid
+                bestBlockData = pet
+            end
+        end
+    end
+
+    if bestBlockUUID and bestBlockData then
+        print(string.format("[Lucky Block Engine] Best lucky block found: %s (Rarity: %s). Placing into pen...", bestBlockData.name, tostring(bestBlockData.Rarity)))
+        
+        local success = pcall(function()
+            RequestPlacePet:FireServer(bestBlockUUID, Vector3.zero, CFrame.new())
+        end)
+        
+        if success then
+            pets[bestBlockUUID] = nil
+            return true
+        end
+    else
+        if not isAutomatedCall then
+            print("[Lucky Block Engine] No lucky blocks detected in inventory cache tables.")
+        else
+            blockCycleDone = true
+        end
+    end
+    return false
+end
+
+local function startAutoPlaceLuckyBlocksLoop()
+    task.spawn(function()
+        print("Auto Place Lucky Blocks Engine Active.")
+        while autoPlaceLuckyBlocks and ScriptID == CurrentScriptID do
+            local executedPlacement = placeLuckyBlockAction(true)
+            if blockCycleDone then
+                local remainingCacheTime = math.max(0, cacheDurationLimit - (os.clock() - lastDataFetchTime))
+                if remainingCacheTime > 0 then
+                    task.wait(math.min(remainingCacheTime, 5))
+                else
+                    updateInventoryCache(true)
+                end
+            elseif not executedPlacement then
+                task.wait(2)
+            else
+                task.wait(0.3)
+            end
+        end
+        print("Auto Place Lucky Blocks Engine Deactivated.")
+    end)
+end
+
+-- Map Extraction Pen Actions
+local function pickupAllMapPetsAction()
+    local pensFolder = workspace:FindFirstChild("PlayerPens")
+    if not pensFolder then return end
+    
+    local targetPen = nil
+    for _, pen in ipairs(pensFolder:GetChildren()) do
+        if pen:GetAttribute("Owner") == LocalPlayer.Name then
+            targetPen = pen
+            break
+        end
+    end
+    
+    if targetPen and targetPen:FindFirstChild("Pets") then
+        local petsToCollect = targetPen.Pets:GetChildren()
+        print(string.format("[Pen Sync Engine] Gathering %d pets from active base pen.", #petsToCollect))
+        for i = 1, #petsToCollect do
+            local petObj = petsToCollect[i]
+            pcall(function()
+                pickupRequest:InvokeServer("Pet", petObj.Name, petObj)
+            end)
+        end
+        print("[Pen Sync Engine] All eligible pen pets processed.")
+    else
+        warn("Could not determine base player pen zone verification match.")
+    end
+end
+
+local function pickupLowestRpsPlacedPetAction()
+    local pensFolder = workspace:FindFirstChild("PlayerPens")
+    if not pensFolder then return end
+    
+    local targetPen = nil
+    for _, pen in ipairs(pensFolder:GetChildren()) do
+        if pen:GetAttribute("Owner") == LocalPlayer.Name then
+            targetPen = pen
+            break
+        end
+    end
+    
+    if targetPen and targetPen:FindFirstChild("Pets") then
+        local petsPlaced = targetPen.Pets:GetChildren()
+        if #petsPlaced == 0 then
+            print("[Pen Sync Engine] Placed pets table is empty.")
+            return
+        end
+        
+        -- Fallback to network parsing layer index lookup to access attributes cleanly from workspace models
+        local lowestRPS = math.huge
+        local targetPetModel = nil
+        
+        for i = 1, #petsPlaced do
+            local pModel = petsPlaced[i]
+            local rpsAttr = pModel:GetAttribute("RPS") or 0
+            
+            if rpsAttr < lowestRPS then
+                lowestRPS = rpsAttr
+                targetPetModel = pModel
+            end
+        end
+        
+        if targetPetModel then
+            print(string.format("[Pen Sync Engine] Placed lowest RPS target discovered: %s (RPS: %.1f). Extracting to inventory...", targetPetModel.Name, lowestRPS))
+            pcall(function()
+                pickupRequest:InvokeServer("Pet", targetPetModel.Name, targetPetModel)
+            end)
+        end
+    else
+        warn("Could not target owner pen node workspace allocations.")
+    end
+end
+
+-- Anti AFK UI & Core State Handler Execution
+local function handleAFKScreenState()
+    local afkGui = PlayerGui:FindFirstChild("AFK")
+    if not afkGui then return end
+    
+    if antiAfkActive then
+        if afkGui.Enabled == true then
+            afkGui.Enabled = false
+        end
+    end
+end
+
 local function startAntiAFK()
     local function handleAFKState()
         if ScriptID ~= CurrentScriptID or not antiAfkActive then 
-            if afkConnection then 
-                afkConnection:Disconnect() 
-                afkConnection = nil 
-            end 
+            if afkConnection then afkConnection:Disconnect() afkConnection = nil end 
+            if afkScreenConnection then afkScreenConnection:Disconnect() afkScreenConnection = nil end
+            
+            local afkGui = PlayerGui:FindFirstChild("AFK")
+            if afkGui then
+                local isAFK = LocalPlayer:GetAttribute("AFK_NextRewardTime") ~= nil
+                afkGui.Enabled = isAFK
+            end
             return 
         end
         LocalPlayer:SetAttribute("AFK_Active", false)
@@ -817,6 +1218,13 @@ local function startAntiAFK()
     
     if afkConnection then afkConnection:Disconnect() end
     afkConnection = LocalPlayer:GetAttributeChangedSignal("AFK_Active"):Connect(handleAFKState)
+    
+    local afkGui = PlayerGui:FindFirstChild("AFK")
+    if afkGui then
+        if afkScreenConnection then afkScreenConnection:Disconnect() end
+        handleAFKScreenState()
+        afkScreenConnection = afkGui:GetPropertyChangedSignal("Enabled"):Connect(handleAFKScreenState)
+    end
 end
 
 -- Handle initial on-by-default execution configurations on startup
@@ -892,7 +1300,7 @@ local Window = Rayfield:CreateWindow({
 
 local MainTab = Window:CreateTab("Main Hub", 4483362458)
 
-MainTab:CreateSection("--- Automation Features ---")
+MainTab:CreateSection("--- Toggles Automation ---")
 
 MainTab:CreateToggle({
     Name = "Auto Farm Lasso Minigame",
@@ -978,22 +1386,42 @@ MainTab:CreateToggle({
     end,
 })
 
-MainTab:CreateButton({
-    Name = "Collect Pet Cash (One-Time)",
-    Callback = function()
-        pcall(function()
-            collectAllPetCash:FireServer()
-        end)
+MainTab:CreateToggle({
+    Name = "Auto Sell Worst Pet",
+    CurrentValue = autoSellWorstPet,
+    Flag = "AutoSellWorstPetToggleFlag",
+    Callback = function(Value)
+        autoSellWorstPet = Value
+        if Value then
+            dataCycleDone = false
+            startAutoSellWorstPetLoop()
+        end
     end,
 })
 
-MainTab:CreateButton({
-    Name = "Force Cancel Minigame",
-    Callback = function()
-        pcall(function()
-            CancelMinigame:FireServer()
-        end)
-        print("Force cancel interaction hook fired to remote.")
+MainTab:CreateToggle({
+    Name = "Auto Place Best Pets",
+    CurrentValue = autoPlaceBestPets,
+    Flag = "AutoPlaceBestPetsToggleFlag",
+    Callback = function(Value)
+        autoPlaceBestPets = Value
+        if Value then
+            placeCycleDone = false
+            startAutoPlaceBestPetsLoop()
+        end
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Auto Place Lucky Blocks",
+    CurrentValue = autoPlaceLuckyBlocks,
+    Flag = "AutoPlaceLuckyBlocksToggleFlag",
+    Callback = function(Value)
+        autoPlaceLuckyBlocks = Value
+        if Value then
+            blockCycleDone = false
+            startAutoPlaceLuckyBlocksLoop()
+        end
     end,
 })
 
@@ -1023,16 +1451,55 @@ MainTab:CreateToggle({
     Flag = "AntiAFKToggle",
     Callback = function(Value)
         antiAfkActive = Value
-        if Value then
-            startAntiAFK()
-        else
-            if afkConnection then
-                afkConnection:Disconnect()
-                afkConnection = nil
-            end
-            local isAFK = LocalPlayer:GetAttribute("AFK_NextRewardTime") ~= nil
-            LocalPlayer:SetAttribute("AFK_Active", isAFK)
-        end
+        startAntiAFK()
+    end,
+})
+
+MainTab:CreateSection("--- Instant One-Time Actions ---")
+
+MainTab:CreateButton({
+    Name = "Sell Worst Pet",
+    Callback = function()
+        sellWorstPetAction(false)
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Place Best Pet",
+    Callback = function()
+        placeBestPetAction(false)
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Pickup Lowest Placed Pet",
+    Callback = function()
+        pickupLowestRpsPlacedPetAction()
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Pickup All Pen Pets",
+    Callback = function()
+        pickupAllMapPetsAction()
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Collect Pet Cash",
+    Callback = function()
+        pcall(function()
+            collectAllPetCash:FireServer()
+        end)
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Force Cancel Minigame",
+    Callback = function()
+        pcall(function()
+            CancelMinigame:FireServer()
+        end)
     end,
 })
 
@@ -1083,6 +1550,20 @@ MainTab:CreateToggle({
 })
 
 MainTab:CreateSection("--- Tuning Configurations ---")
+
+MainTab:CreateInput({
+    Name = "Sell Pet Minimum RPS Threshold",
+    PlaceholderText = "Default: 50",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        local val = tonumber(Text)
+        if val then
+            sellRpsThreshold = val
+            dataCycleDone = false 
+            print(string.format("[Config System] Sell Pet threshold configuration adjusted: %d RPS", val))
+        end
+    end,
+})
 
 MainTab:CreateInput({
     Name = "Minimum RPS Threshold",
@@ -1182,27 +1663,5 @@ MainTab:CreateSlider({
     Flag = "TeleportSyncDelayFlag",
     Callback = function(Value)
         teleportWaitTime = Value
-    end,
-})
-
-MainTab:CreateSlider({
-    Name = "Fins Default Speed Mod",
-    Range = {10, 300},
-    Increment = 5,
-    CurrentValue = defaultSpeed,
-    Flag = "FinsSpeedModSlider",
-    Callback = function(Value)
-        defaultSpeed = Value
-    end,
-})
-
-MainTab:CreateSlider({
-    Name = "Max Jetpack Speed Mod",
-    Range = {10, 300},
-    Increment = 5,
-    CurrentValue = maxJetpackSpeed,
-    Flag = "JetpackSpeedModSlider",
-    Callback = function(Value)
-        maxJetpackSpeed = Value
     end,
 })
