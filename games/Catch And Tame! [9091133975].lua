@@ -95,29 +95,6 @@ local blockCycleDone = false
 local replaceCycleDone = false
 
 -- FIX: Optimized Metatable Namecall Interception Engine to eliminate table creation leaks
-local function initiateNamecallInterception()
-    local oldNamecall
-    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-        local method = getnamecallmethod()
-        
-        if ScriptID == CurrentScriptID and self == retrieveData and (method == "InvokeServer" or method == "invokeServer") then
-            -- Only instantiate dynamic references when our specific remote triggers
-            local data = oldNamecall(self, ...)
-            
-            if data and type(data) == "table" and data.inventory and data.inventory.pets then
-                cachedInventoryData = data.inventory.pets
-                lastDataFetchTime = os.clock()
-                dataCycleDone = false   
-                placeCycleDone = false  
-                blockCycleDone = false
-                replaceCycleDone = false
-            end
-            return data
-        end
-        return oldNamecall(self, ...)
-    end)
-end
-initiateNamecallInterception()
 
 -- Suffix Parsing Map
 local suffixMultipliers = { k = 1e3, m = 1e6, b = 1e9, t = 1e12 }
