@@ -94,15 +94,15 @@ local placeCycleDone = false
 local blockCycleDone = false
 local replaceCycleDone = false
 
--- Metatable Namecall Interception Engine for retrieveData Sync Cache
+-- FIX: Optimized Metatable Namecall Interception Engine to eliminate table creation leaks
 local function initiateNamecallInterception()
     local oldNamecall
     oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
         
         if ScriptID == CurrentScriptID and self == retrieveData and (method == "InvokeServer" or method == "invokeServer") then
-            local results = {oldNamecall(self, ...)}
-            local data = results[1]
+            -- Only instantiate dynamic references when our specific remote triggers
+            local data = oldNamecall(self, ...)
             
             if data and type(data) == "table" and data.inventory and data.inventory.pets then
                 cachedInventoryData = data.inventory.pets
@@ -112,7 +112,7 @@ local function initiateNamecallInterception()
                 blockCycleDone = false
                 replaceCycleDone = false
             end
-            return unpack(results)
+            return data
         end
         return oldNamecall(self, ...)
     end)
@@ -163,7 +163,6 @@ local dynamicBlacklist = setmetatable({}, {__mode = "k"})
 local afkConnection = nil
 local afkScreenConnection = nil
 
--- FIX: Completely removed the infinite loop calling getgc(). This runs ONCE safely.
 local function applyGearModifications()
     task.spawn(function()
         while ScriptID == CurrentScriptID and not getrenv()._G.Loaded do
@@ -184,7 +183,6 @@ local function applyGearModifications()
         local maxDiscoveredFinSpeed = 50
         local maxDiscoveredJetpackSpeed = 70
 
-        -- Perform a single structural pass over the Lua GC registry
         local gc = getgc(true)
         for i = 1, #gc do
             local v = gc[i]
@@ -221,7 +219,6 @@ local function applyGearModifications()
             end
         end
         
-        -- Apply Attributes Once
         if LocalPlayer then
             pcall(function()
                 LocalPlayer:SetAttribute("equippedTank", "Fusion Tank")
@@ -231,9 +228,7 @@ local function applyGearModifications()
             end)
         end
         
-        -- Explicitly clear gc local reference to allow memory disposal immediately
         gc = nil
-        print("[Mod GC] One-time safety configuration patch applied. Scanner disconnected.")
     end)
 end
 applyGearModifications()
