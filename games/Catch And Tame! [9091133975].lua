@@ -94,7 +94,46 @@ local placeCycleDone = false
 local blockCycleDone = false
 local replaceCycleDone = false
 
--- FIX: Optimized Metatable Namecall Interception Engine to eliminate table creation leaks
+-- UPDATED: Integrated high-performance namecall interception with strict guard clauses
+local function initiateNamecallInterception()
+    local oldNamecall
+    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local method = getnamecallmethod()
+        
+        -- 1. GUARD CLAUSE: Immediately exit if it's not a server invocation
+        if method ~= "InvokeServer" then
+            setnamecallmethod(method)
+            return oldNamecall(self, ...)
+        end
+        
+        -- 2. GUARD CLAUSE: Immediately exit if it's not our target script or remote
+        if self ~= retrieveData or ScriptID ~= CurrentScriptID then
+            setnamecallmethod(method)
+            return oldNamecall(self, ...)
+        end
+        
+        -- 3. INTERCEPTION: Handle the target remote safely
+        setnamecallmethod(method)
+        local data = oldNamecall(self, ...)
+        
+        if type(data) ~= "table" then 
+            return data 
+        end
+        
+        local inventory = data.inventory
+        if inventory and inventory.pets then
+            cachedInventoryData = inventory.pets
+            lastDataFetchTime = os.clock()
+            dataCycleDone = false   
+            placeCycleDone = false  
+            blockCycleDone = false
+            replaceCycleDone = false
+        end
+        
+        return data
+    end)
+end
+initiateNamecallInterception()
 
 -- Suffix Parsing Map
 local suffixMultipliers = { k = 1e3, m = 1e6, b = 1e9, t = 1e12 }
