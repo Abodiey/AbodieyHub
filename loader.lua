@@ -1,358 +1,451 @@
--- AbodieyHub | Configurable Universal Match Loader & Manager Suite
+getgenv().ScriptID = os.time()
+local CurrentScriptID = getgenv().ScriptID
 
-local showGui = ...
-if showGui == nil then showGui = false end
+print("[+] Script initialized with ID: " .. tostring(CurrentScriptID))
 
--- 1. Secure Wait-State Layer (Ensures valid engine identifiers before execution)
-if not game:IsLoaded() then
-    game.Loaded:Wait()
-end
+-- Service Configuration
+local Players = cloneref(game:GetService("Players"))
+local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
 
-while true do
-    local valid, gid, pid = pcall(function()
-        return game.GameId, game.PlaceId
-    end)
-    if valid and gid and pid and gid ~= 0 and pid ~= 0 then
-        break
-    end
-    task.wait(0.5)
-end
+local LocalPlayer = Players.LocalPlayer
 
-local currentId = tostring(game.GameId)
-local fallbackId = tostring(game.PlaceId)
-local http = cloneref(game:GetService("HttpService"))
+-- Explicit Event Declaration
+local LoadEvent = ReplicatedStorage:WaitForChild("Load")
+local InsertElementEvent = ReplicatedStorage:WaitForChild("InsertElement")
+local LoadEffectEvent = ReplicatedStorage:WaitForChild("LoadEffect")
+local LoadEffect2Event = ReplicatedStorage:WaitForChild("LoadEffect2")
+local SystemMessageEvent = ReplicatedStorage:WaitForChild("SystemMessage")
 
-local api = "https://api.github.com/repos/Abodiey/AbodieyHub/contents/games"
-local configFile = "AbodieyHub_Toggles.json"
+-- Custom Tool and Targeted Deletion Remotes
+local CustomToolEvent = ReplicatedStorage:WaitForChild("^w^")
+local MeowDeleteEvent = ReplicatedStorage:WaitForChild("meow")
 
--- Helper function to format massive metrics cleanly (e.g., 10,500 -> 10.5K)
-local function formatMetric(value)
-    local num = tonumber(value)
-    if not num then return "0" end
-    if num >= 1000000 then
-        return string.format("%.1fM", num / 1000000):gsub("%.0M", "M")
-    elseif num >= 1000 then
-        return string.format("%.1fK", num / 1000):gsub("%.0K", "K")
-    end
-    return tostring(num)
-end
+-- Paths
+local ItemsFolder = workspace:WaitForChild("_Items")
 
--- Helper functions for local file-system persistence
-local function loadSavedToggles()
-    local defaultStructure = {
-        disabled = {},     -- Tracks explicitly disabled scripts (default is false/nil)
-        askBefore = {}    -- Controls if it needs approval before firing (default is false/nil)
-    }
-    
-    local readSuccess, content = pcall(function()
-        return readfile(configFile)
-    end)
-    
-    if readSuccess and content then
-        pcall(function()
-            local decoded = http:JSONDecode(content)
-            if type(decoded) == "table" then
-                if type(decoded.disabled) == "table" then defaultStructure.disabled = decoded.disabled end
-                if type(decoded.askBefore) == "table" then defaultStructure.askBefore = decoded.askBefore end
-            end
-        end)
-    end
-    return defaultStructure
-end
+-- Global Script State Tracking
+local ScriptEnabled = false
+local BlockNotifications = true
+local AntiAdminEnabled = true
 
-local function saveToggles(t)
-    pcall(function()
-        writefile(configFile, http:JSONEncode(t))
-    end)
-end
+-- Tunable Parameters
+local PlacementCooldown = 0.5
+local VerificationTimeout = 2.0
+local PostFailureDelay = 3.0
+local MinElementNameLength = 7
+local MaxElementNameLength = 14
 
--- Helper function to fetch comprehensive game data (Details + Votes) from Roblox APIs
-local function fetchGameDetails(universeId)
-    local detailsUrl = "https://games.roblox.com/v1/games?universeIds=" .. tostring(universeId)
-    local votesUrl = "https://games.roblox.com/v1/games/votes?universeIds=" .. tostring(universeId)
-    
-    local dataMap = {
-        name = "Unknown Game",
-        playing = "0",
-        visits = "0",
-        creator = "Unknown Creator",
-        likes = "0",
-        dislikes = "0"
-    }
-    
-    local s1, r1 = pcall(function() return game:HttpGet(detailsUrl) end)
-    if s1 and r1 then
-        local d1 = http:JSONDecode(r1)
-        if d1 and d1.data and d1.data[1] then
-            local info = d1.data[1]
-            dataMap.name = info.name or dataMap.name
-            dataMap.playing = formatMetric(info.playing)
-            dataMap.visits = formatMetric(info.visits)
-            dataMap.creator = info.creator and info.creator.name or dataMap.creator
-        end
-    end
-    
-    local s2, r2 = pcall(function() return game:HttpGet(votesUrl) end)
-    if s2 and r2 then
-        local d2 = http:JSONDecode(r2)
-        if d2 and d2.data and d2.data[1] then
-            dataMap.likes = formatMetric(d2.data[1].upVotes)
-            dataMap.dislikes = formatMetric(d2.data[1].downVotes)
-        end
-    end
-    
-    return dataMap
-end
+-- Session States
+local StatusParagraph = nil
 
--- Create an isolated standalone prompt panel bypassing framework UI instances entirely
-local function createVerificationPrompt(fileName)
-    local coreGui = cloneref(game:GetService("CoreGui"))
-    local signal = Instance.new("BindableEvent")
-    
-    local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "AbodieyPrompt_" .. fileName:gsub("%D", "")
-    screenGui.ResetOnSpawn = false
-    screenGui.Parent = coreGui
-    
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 320, 0, 140)
-    frame.Position = UDim2.new(0.5, -160, 0.4, -70)
-    frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-    frame.BorderSizePixel = 0
-    frame.Active = true
-    frame.Draggable = true
-    frame.Parent = screenGui
-    
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 8)
-    corner.Parent = frame
-    
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -20, 0, 40)
-    title.Position = UDim2.new(0, 10, 0, 10)
-    title.BackgroundTransparency = 1
-    title.Text = "Execution Authorization Required:\n" .. fileName
-    title.TextColor3 = Color3.fromRGB(240, 240, 240)
-    title.Font = Enum.Font.SourceSansBold
-    title.TextSize = 14
-    title.TextWrapped = true
-    title.Parent = frame
-    
-    local desc = Instance.new("TextLabel")
-    desc.Size = UDim2.new(1, -20, 0, 25)
-    desc.Position = UDim2.new(0, 10, 0, 55)
-    desc.BackgroundTransparency = 1
-    desc.Text = "This file is flagged to ask before running. Allow?"
-    desc.TextColor3 = Color3.fromRGB(160, 160, 160)
-    desc.Font = Enum.Font.SourceSans
-    desc.TextSize = 13
-    desc.Parent = frame
+-- Signaling Variables for Network Listeners
+local MergeStateReceived = false
+local DiscoveredNewElement = false
+local MergeFailedReceived = false
 
-    local function createButton(name, xOffset, bg, textCol)
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 130, 0, 35)
-        btn.Position = UDim2.new(0, xOffset, 0, 90)
-        btn.BackgroundColor3 = bg
-        btn.Text = name
-        btn.TextColor3 = textCol
-        btn.Font = Enum.Font.SourceSansBold
-        btn.TextSize = 14
-        btn.Parent = frame
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
-        return btn
-    end
+-- Forward Declarations
+local GetPlaced
+local DeletePlacedItem
+
+-- Anti Admin Logic (Kicks if rank is strictly higher than 2)
+local function CheckForAdmin(player)
+    if not AntiAdminEnabled or player == LocalPlayer then return end
     
-    local yesBtn = createButton("Yes, Execute", 20, Color3.fromRGB(40, 120, 70), Color3.fromRGB(255, 255, 255))
-    local noBtn = createButton("No, Cancel", 170, Color3.fromRGB(140, 40, 40), Color3.fromRGB(255, 255, 255))
-    
-    yesBtn.MouseButton1Click:Connect(function()
-        signal:Fire(true)
-        screenGui:Destroy()
+    local success, rank = pcall(function()
+        return player:GetRankInGroup(6804560)
     end)
     
-    noBtn.MouseButton1Click:Connect(function()
-        signal:Fire(false)
-        screenGui:Destroy()
-    end)
-    
-    return signal.Event:Wait()
+    if success and rank and rank > 2 then
+        LocalPlayer:Kick("Anti-Admin: Staff member detected (" .. player.Name .. ")")
+    end
 end
 
--- Initialize persistent state parameters
-local configDb = loadSavedToggles()
-
--- Fetch Repository Inventory Data
-local success, response = pcall(function()
-    return game:HttpGet(api)
+task.spawn(function()
+    for _, player in ipairs(Players:GetPlayers()) do
+        CheckForAdmin(player)
+    end
+    Players.PlayerAdded:Connect(CheckForAdmin)
 end)
 
-if success and response then
-    local decodeSuccess, fileArray
-    decodeSuccess, fileArray = pcall(function()
-        local decode = http.JSONDecode
-        return decode(http, response)
+-- Immediate Background Memory Scan Task
+task.spawn(function()
+    if _G.Elements then return end
+
+    local path = LocalPlayer:WaitForChild("PlayerGui"):WaitForChild("ClientGui"):WaitForChild("SavedElementsFrame"):WaitForChild("ElementsScrollingFrame")
+    local virtualScript = LocalPlayer:WaitForChild("PlayerGui"):WaitForChild("ClientGui"):WaitForChild("Client"):WaitForChild("VirtualElements")
+
+    local children = path:GetChildren()
+    local targetName = ""
+
+    for i = 1, #children do
+        if children[i].Name ~= "" then
+            targetName = children[i].Name
+            break
+        end
+    end
+
+    local targetCount = require(virtualScript).GetElementCount()
+    local gc = getgc(true)
+
+    for i = 1, #gc do
+        local v = gc[i]
+        if type(v) == "table" and type(rawget(v, targetName)) == "table" then
+            local count = 0
+            for _ in pairs(v) do count = count + 1 end
+            
+            if count >= targetCount then
+                _G.Elements = v
+                break
+            end
+        end
+    end
+end)
+
+-- Hard synchronization barrier directly following the scanner launch
+while not _G.Elements do task.wait(0.1) end
+
+-- Signal Interceptor Hooks
+local function InitializeSignals()
+    LoadEffectEvent.OnClientEvent:Connect(function(actionType, ...)
+        if getgenv().ScriptID ~= CurrentScriptID or not ScriptEnabled then return end
+        
+        if actionType == "MixStart" then
+            MergeStateReceived = false
+            DiscoveredNewElement = false
+            MergeFailedReceived = false
+        elseif actionType == "MixNormal" then
+            DiscoveredNewElement = true
+            MergeStateReceived = true
+        end
     end)
 
-    if decodeSuccess and type(fileArray) == "table" then
-        local parsedInventory = {}
-        local currentMatchedScripts = {} -- Maps fileName string to the full API file dictionary object
-        local configUpdated = false
-
-        for _, file in ipairs(fileArray) do
-            local name = file.name
-            
-            local matchedId = name:match("%[%s*(%d+)%s*%]") or name:match("(%d%d%d%d%d+)")
-            
-            if matchedId then
-                if not parsedInventory[matchedId] then
-                    parsedInventory[matchedId] = {}
-                end
-                table.insert(parsedInventory[matchedId], name)
-            end
-
-            if name:find(currentId, 1, true) or name:find(fallbackId, 1, true) then
-                currentMatchedScripts[name] = file
-            end
-
-            -- Defaults config cleanup logic
-            if configDb.disabled[name] == nil then 
-                configDb.disabled[name] = false 
-                configUpdated = true
-            end
-            if configDb.askBefore[name] == nil then 
-                configDb.askBefore[name] = false 
-                configUpdated = true
-            end
-        end
+    SystemMessageEvent.OnClientEvent:Connect(function(arg1, arg2)
+        if getgenv().ScriptID ~= CurrentScriptID then return end
         
-        if configUpdated then
-            saveToggles(configDb)
+        local msg = tostring(arg2)
+        if ScriptEnabled and string.find(msg, "Merge Failed") then
+            MergeFailedReceived = true
+            MergeStateReceived = true
+        end
+    end)
+    
+    if type(getconnections) == "function" then
+        for _, connection in ipairs(getconnections(SystemMessageEvent.OnClientEvent)) do
+            local oldFunction; oldFunction = hookfunction(connection.Function, function(...)
+                if getgenv().ScriptID ~= CurrentScriptID then return oldFunction(...) end
+                local args = {...}
+                local message = args[2]
+                if BlockNotifications and type(message) == "string" and string.find(message, "New Discovered Element") then
+                    return 
+                end
+                return oldFunction(...)
+            end)
         end
 
-        -- ====================================================
-        -- PATH A: GUI CONFIGURATION MODE (Pure Management)
-        -- ====================================================
-        if showGui then
-            local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
-            local Window = Rayfield:CreateWindow({
-                Name = "AbodieyHub Engine Panel",
-                LoadingTitle = "Syncing Local Hub Configs...",
-                LoadingSubtitle = "by Abodiey",
-                ConfigurationSaving = { Enabled = false }
-            })
-
-            -- Tab 1: Current Session Analytics
-            local CurrentTab = Window:CreateTab("Current Game", 4483362458)
-            CurrentTab:CreateSection("Target Environment Context")
-            
-            local activeDetails = fetchGameDetails(currentId)
-            CurrentTab:CreateLabel("🎮 Title: " .. activeDetails.name)
-            CurrentTab:CreateLabel("🆔 Universe ID: " .. currentId .. " | Place ID: " .. fallbackId)
-            CurrentTab:CreateLabel("👤 Creator: " .. activeDetails.creator)
-            CurrentTab:CreateLabel("🔥 Active: " .. activeDetails.playing .. " | 👍 Likes: " .. activeDetails.likes .. " | 👎 Dislikes: " .. activeDetails.dislikes)
-            
-            CurrentTab:CreateSection("Associated Script Profiles")
-            local activeCount = 0
-            for fileName, _ in pairs(currentMatchedScripts) do
-                activeCount = activeCount + 1
-                CurrentTab:CreateToggle({
-                    Name = "Disable Script: " .. fileName,
-                    CurrentValue = configDb.disabled[fileName],
-                    Callback = function(Value)
-                        configDb.disabled[fileName] = Value
-                        saveToggles(configDb)
-                    end,
-                })
-                CurrentTab:CreateToggle({
-                    Name = "└─ Ask Before Running",
-                    CurrentValue = configDb.askBefore[fileName] or false,
-                    Callback = function(Value)
-                        configDb.askBefore[fileName] = Value
-                        saveToggles(configDb)
-                    end,
-                })
-            end
-            if activeCount == 0 then
-                CurrentTab:CreateLabel("No assets found matching this game environment.")
-            end
-
-            -- Tab 2: Universal Database Explorer
-            local InventoryTab = Window:CreateTab("All Supported Games", 4483362458)
-            
-            for targetId, files in pairs(parsedInventory) do
-                local details = fetchGameDetails(targetId)
-                local sectionTitle = "🎮 " .. details.name .. " (" .. details.playing .. " playing) [ID: " .. targetId .. "]"
+        for _, connection in ipairs(getconnections(LoadEffect2Event.OnClientEvent)) do
+            local oldFunction; oldFunction = hookfunction(connection.Function, function(...)
+                if getgenv().ScriptID ~= CurrentScriptID then return oldFunction(...) end
                 
-                InventoryTab:CreateSection(sectionTitle)
-                InventoryTab:CreateLabel("👍 Likes: " .. details.likes .. " | 👎 Dislikes: " .. details.dislikes .. " | 📊 Total Visits: " .. details.visits)
+                local args = {...}
+                local targetUser = args[1]
                 
-                for _, fileName in ipairs(files) do
-                    InventoryTab:CreateToggle({
-                        Name = "Disable: " .. fileName,
-                        CurrentValue = configDb.disabled[fileName],
-                        Callback = function(Value)
-                            configDb.disabled[fileName] = Value
-                            saveToggles(configDb)
-                        end,
-                    })
-                    InventoryTab:CreateToggle({
-                        Name = "   └─ Ask Before Running",
-                        CurrentValue = configDb.askBefore[fileName] or false,
-                        Callback = function(Value)
-                            configDb.askBefore[fileName] = Value
-                            saveToggles(configDb)
-                        end,
-                    })
-                end
-            end
-
-            -- Tab 3: Close Control Interface Panel
-            local ActionTab = Window:CreateTab("Exit Panel", 4483362458)
-            ActionTab:CreateSection("Unload Framework Interface")
-            ActionTab:CreateButton({
-                Name = "Completely Close & Destroy GUI",
-                Callback = function()
-                    Rayfield:Destroy()
-                end,
-            })
-
-        -- ====================================================
-        -- PATH B: SILENT EXECUTION MODE (Executes Target Modules)
-        -- ====================================================
-        else
-            for fileName, fileData in pairs(currentMatchedScripts) do
-                local isDisabled = configDb.disabled[fileName]
-                
-                if not isDisabled then
-                    local allowExecution = true
-                    local askConfig = configDb.askBefore[fileName]
-                    
-                    if askConfig == true then
-                        allowExecution = createVerificationPrompt(fileName)
-                    end
-
-                    if allowExecution and fileData.download_url then
-                        local contentSuccess, content = pcall(function()
-                            return game:HttpGet(fileData.download_url)
-                        end)
-
-                        if contentSuccess and content then
-                            local execute, compileError = loadstring(content, "=" .. fileName)
-                            if execute then
-                                task.spawn(function()
-                                    local runSuccess, runtimeError = pcall(execute)
-                                    if not runSuccess then
-                                        warn("[AbodieyHub Runtime Error] File: " .. fileName .. "\n" .. tostring(runtimeError))
-                                    end
-                                end)
-                            else
-                                warn("[AbodieyHub Syntax Error] File: " .. fileName .. "\n" .. tostring(compileError))
-                            end
-                        end
+                if BlockNotifications then
+                    if type(targetUser) ~= "string" or not string.find(targetUser, LocalPlayer.Name) then
+                        return 
                     end
                 end
-            end
+                return oldFunction(...)
+            end)
         end
-
     end
 end
+InitializeSignals()
+
+local function UpdateDisplayUI(statusText)
+    if getgenv().ScriptID ~= CurrentScriptID then return end
+    if StatusParagraph then
+        StatusParagraph:Set({ Title = "Logs", Content = statusText })
+    end
+end
+
+local function Load()
+    LoadEvent:FireServer()
+end
+
+function GetElements()
+    if not _G.Elements then return {} end
+    
+    local names = {}
+    for elementName, _ in pairs(_G.Elements) do
+        if type(elementName) == "string" and elementName ~= "" then
+            table.insert(names, elementName)
+        end
+    end
+    return names
+end
+
+local function GetRandomShortElement()
+    local elements = GetElements()
+    local filteredElements = {}
+    for i = 1, #elements do
+        local name = elements[i]
+        if #name >= MinElementNameLength and #name <= MaxElementNameLength then 
+            table.insert(filteredElements, name) 
+        end
+    end
+    if #filteredElements > 0 then
+        return filteredElements[math.random(1, #filteredElements)]
+    elseif #elements > 0 then
+        return elements[math.random(1, #elements)]
+    end
+    return nil
+end
+
+function GetPlaced()
+    local myItems = {}
+    local children = ItemsFolder:GetChildren()
+    for i = 1, #children do
+        local item = children[i]
+        if item:GetAttribute("Placer") == LocalPlayer.Name and item.Name and item.Name ~= "" then
+            table.insert(myItems, item)
+        end
+    end
+    return myItems
+end
+
+function PlaceElement(name)
+    local activeCount = #GetPlaced()
+    if activeCount >= 2 then 
+        return false 
+    end
+
+    if not name or name == "" or #name > 18 then return false end
+    Load()
+    InsertElementEvent:FireServer(name)
+    task.wait(PlacementCooldown)
+    return true
+end
+
+function DeletePlacedItem(targetItem)
+    if not targetItem or not targetItem:IsDescendantOf(workspace) then return end
+    
+    local character = LocalPlayer.Character
+    if not character then return end
+    
+    local toolsAttribute = LocalPlayer:GetAttribute("Tools")
+    local unlocked = type(toolsAttribute) == "string" and string.find(toolsAttribute, "Delete")
+    
+    if not unlocked then
+        CustomToolEvent:InvokeServer("et", "Delete")
+        task.wait(0.1)
+    end
+    
+    local currentlyEquipped = character:FindFirstChild("Delete")
+    if not currentlyEquipped then
+        CustomToolEvent:InvokeServer("t", "Delete")
+    end
+    
+    if character:FindFirstChild("Delete") then
+        MeowDeleteEvent:InvokeServer(targetItem)
+    end
+    
+    CustomToolEvent:InvokeServer("t", "Delete")
+end
+
+function GetMergeSuggestion(availableElements)
+    local filteredElements = {}
+    for i = 1, #availableElements do
+        local element = availableElements[i]
+        if #element >= MinElementNameLength and #element <= MaxElementNameLength then
+            table.insert(filteredElements, element)
+            if #filteredElements >= 100 then break end
+        end
+    end
+    if #filteredElements == 0 then return nil end
+    return filteredElements[math.random(1, #filteredElements)]
+end
+
+local function RunIteration()
+    local initialAvailable = GetElements()
+    local currentItems = GetPlaced()
+
+    if #currentItems > 2 then
+        UpdateDisplayUI("Overcrowded board. Purging extras...")
+        for i = 2, #currentItems do
+            local itemToClean = currentItems[i]
+            if itemToClean then DeletePlacedItem(itemToClean) end
+        end
+        return
+    end
+
+    if #currentItems == 0 then
+        local baseElement = GetRandomShortElement()
+        if baseElement then
+            UpdateDisplayUI("Board empty. Dropping: " .. baseElement)
+            PlaceElement(baseElement)
+        end
+        return
+    end
+
+    local targetItem = currentItems[1]
+    if not targetItem or not targetItem:IsA("BasePart") then return end
+    
+    local mergeCandidate = GetMergeSuggestion(initialAvailable)
+    if not mergeCandidate then return end
+    
+    MergeStateReceived = false
+    DiscoveredNewElement = false
+    MergeFailedReceived = false
+
+    UpdateDisplayUI("Mixing: " .. mergeCandidate .. " + " .. targetItem.Name)
+    local success = PlaceElement(mergeCandidate)
+    if not success then return end
+    
+    local startWaitTime = os.clock()
+    local initialCount = #GetPlaced()
+    local unhookedHangDetected = false
+
+    while not MergeStateReceived and (os.clock() - startWaitTime) < VerificationTimeout do
+        if not ScriptEnabled or getgenv().ScriptID ~= CurrentScriptID then return end
+        if (os.clock() - startWaitTime) >= 5.0 and #GetPlaced() == initialCount then
+            unhookedHangDetected = true
+            MergeStateReceived = true -- FIXED: Force sets to true to break loop and evaluate deletion blocks below immediately
+            break
+        end
+        task.wait()
+    end
+
+    if DiscoveredNewElement and not unhookedHangDetected then
+        UpdateDisplayUI("New element tracked!")
+    elseif MergeFailedReceived or not MergeStateReceived or unhookedHangDetected then
+        if unhookedHangDetected then
+            UpdateDisplayUI("Network hang. Clearing board...")
+        elseif not MergeStateReceived then
+            UpdateDisplayUI("Timeout. Syncing...")
+        else
+            UpdateDisplayUI("Failed combo. Cleaning up.")
+        end
+
+        local checkItems = GetPlaced()
+        if #checkItems >= 2 then
+            local itemA = checkItems[1]
+            local itemB = checkItems[2]
+            
+            if itemA and itemB then
+                local itemToDelete = (#itemA.Name >= #itemB.Name) and itemA or itemB
+                DeletePlacedItem(itemToDelete)
+            end
+        elseif #checkItems == 1 then
+            DeletePlacedItem(checkItems[1])
+        end
+
+        task.wait(PostFailureDelay)
+    end
+end
+
+-- Rayfield GUI Interface Initialization
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local Window = Rayfield:CreateWindow({
+    Name = "Craft Automation",
+    LoadingTitle = "Loading Automation...",
+    LoadingSubtitle = "by Abdullah Alhamidi",
+    ConfigurationSaving = { Enabled = false },
+    KeySystem = false
+})
+
+local MainTab = Window:CreateTab("Dashboard", nil)
+
+MainTab:CreateSection("Main")
+
+MainTab:CreateToggle({
+    Name = "Enable Automation",
+    CurrentValue = false,
+    Flag = "LoopToggleFlag",
+    Callback = function(Value)
+        ScriptEnabled = Value
+        if ScriptEnabled then
+            UpdateDisplayUI("Running automation loop...")
+            task.spawn(function()
+                while ScriptEnabled do
+                    if getgenv().ScriptID ~= CurrentScriptID then break end
+                    local success, err = pcall(RunIteration)
+                    if not success then warn("[-] Engine error: " .. tostring(err)) end
+                    task.wait(0.05)
+                end
+            end)
+        else
+            UpdateDisplayUI("Loop deactivated.")
+        end
+    end
+})
+
+MainTab:CreateToggle({
+    Name = "Anti-Admin",
+    CurrentValue = true,
+    Flag = "AntiAdminFlag",
+    Callback = function(Value) AntiAdminEnabled = Value end
+})
+
+MainTab:CreateToggle({
+    Name = "Mute Alerts",
+    CurrentValue = true,
+    Flag = "MuteSpamFlag",
+    Callback = function(Value) BlockNotifications = Value end
+})
+
+MainTab:CreateSection("Delays")
+
+MainTab:CreateSlider({
+    Name = "Placement Cooldown",
+    Range = {0.0, 2.0},
+    Increment = 0.05,
+    Suffix = "s",
+    CurrentValue = 0.5,
+    Flag = "PlacementCooldownFlag",
+    Callback = function(Value) PlacementCooldown = Value end
+})
+
+MainTab:CreateSlider({
+    Name = "Verification Timeout",
+    Range = {0.5, 5.0},
+    Increment = 0.1,
+    Suffix = "s",
+    CurrentValue = 2.0,
+    Flag = "VerificationTimeoutFlag",
+    Callback = function(Value) VerificationTimeout = Value end
+})
+
+MainTab:CreateSlider({
+    Name = "Failure Throttle Delay",
+    Range = {0.0, 10.0},
+    Increment = 0.5,
+    Suffix = "s",
+    CurrentValue = 3.0,
+    Flag = "PostFailureDelayFlag",
+    Callback = function(Value) PostFailureDelay = Value end
+})
+
+MainTab:CreateSection("Filters")
+
+MainTab:CreateSlider({
+    Name = "Min Name Length",
+    Range = {1, 20},
+    Increment = 1,
+    Suffix = " chars",
+    CurrentValue = 7,
+    Flag = "MinCharLenFlag",
+    Callback = function(Value) MinElementNameLength = Value end
+})
+
+MainTab:CreateSlider({
+    Name = "Max Name Length",
+    Range = {5, 30},
+    Increment = 1,
+    Suffix = " chars",
+    CurrentValue = 14,
+    Flag = "MaxCharLenFlag",
+    Callback = function(Value) MaxElementNameLength = Value end
+})
+
+MainTab:CreateSection("Diagnostics")
+StatusParagraph = MainTab:CreateParagraph({Title = "Logs", Content = "System idling..."})
