@@ -303,10 +303,10 @@ task.spawn(function()
                 pcall(function()
                     RemoteFunc:InvokeServer("mds", element, "am")
                 end)
-                task.wait(1)
+                task.wait(5)
             end
         else
-            task.wait(1)
+            task.wait(5)
         end
     end
 end)
