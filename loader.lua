@@ -15,7 +15,7 @@ while true do
     if valid and gid and pid and gid ~= 0 and pid ~= 0 then
         break
     end
-    task.wait(0.5)
+    task.wait()
 end
 
 local currentId = tostring(game.GameId)
