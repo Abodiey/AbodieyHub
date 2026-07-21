@@ -300,7 +300,6 @@ task.spawn(function()
         local currentListings = getLatestListings()
         if currentListings and next(currentListings) then
             for element in pairs(currentListings) do
-                print(tostring(element), typeof(element))
                 pcall(function()
                     RemoteFunc:InvokeServer("mds", element, "am")
                 end)
